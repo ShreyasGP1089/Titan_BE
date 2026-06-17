@@ -8,7 +8,7 @@ from flask_cors import CORS
 import logging
 import os
 from functools import wraps
-from planner import shopping_planner
+from hf_planner import shopping_planner
 from tools import hybrid_search, get_categories, compare_products
 from db import initialize_pool, close_pool
 from embedding import load_model
