@@ -7,7 +7,8 @@ FROM python:3.11-slim as base
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PORT=5000
 
 WORKDIR /app
 
@@ -24,6 +25,9 @@ COPY backend/requirements_production.txt requirements.txt
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install gunicorn for production
+RUN pip install --no-cache-dir gunicorn
+
 # Copy application code
 COPY backend/ ./backend/
 COPY training/outputs/shopping_agent_lora_hf/ ./training/outputs/shopping_agent_lora_hf/
@@ -38,6 +42,6 @@ EXPOSE 5000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
   CMD curl -f http://localhost:5000/api/v1/system/health || exit 1
 
-# Run the application
+# Run the application with gunicorn
 WORKDIR /app/backend
-CMD ["python", "api_swagger.py"]
+CMD gunicorn --bind 0.0.0.0:$PORT --workers 1 --timeout 120 --access-logfile - --error-logfile - "api_swagger:app"
