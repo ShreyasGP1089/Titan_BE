@@ -1,0 +1,271 @@
+# ============================================================================
+# Production Deployment .gitignore
+# For Railway / Render / Cloud Deployment
+# ============================================================================
+
+# ============================================================================
+# Python
+# ============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# ============================================================================
+# Environment & Secrets
+# ============================================================================
+.env
+.env.local
+backend/.env
+*.key
+*.pem
+*.p12
+*.crt
+*.cer
+
+# Keep example files
+!.env.example
+!.env.production.example
+
+# ============================================================================
+# Operating System
+# ============================================================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+
+# ============================================================================
+# IDE & Editors
+# ============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+.vim/
+
+# ============================================================================
+# Logs
+# ============================================================================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# ============================================================================
+# Testing
+# ============================================================================
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# Test files (not needed in production)
+backend/test_*.py
+backend/*_test.py
+
+# ============================================================================
+# Documentation (Redundant/Internal)
+# ============================================================================
+# Keep only essential deployment docs, ignore internal/development docs
+
+# Internal development docs
+CLEANUP_SUMMARY.md
+IMPLEMENTATION_COMPLETE.txt
+REFACTORING_COMPLETE.md
+MIGRATION_SUMMARY.md
+DOCUMENTATION_INDEX.md
+
+# Redundant deployment guides (keep only DEPLOY_NOW.md and README.md)
+DEPLOYMENT_README.md
+PRODUCTION_DEPLOYMENT.md
+PRODUCTION_READY.md
+READY_TO_DEPLOY.txt
+DEPLOYMENT_QUICK_REFERENCE.md
+
+# Backend redundant docs
+backend/QUICKSTART.md
+backend/SETUP.md
+backend/SUCCESS_GUIDE.md
+backend/SWAGGER_GUIDE.md
+backend/SWAGGER_QUICKSTART.txt
+backend/VISUAL_GUIDE.md
+backend/CONNECTION_TROUBLESHOOTING.md
+backend/DEPLOYMENT.md
+
+# API guides (redundant with Swagger /docs)
+API_GUIDE.md
+backend/OPENAPI_CONFIG.json
+
+# ============================================================================
+# Scripts (Development/Testing Only)
+# ============================================================================
+verify_production_ready.sh
+quick_verify.sh
+backend/generate_cert.sh
+backend/example_client.html
+
+# ============================================================================
+# Training (Not needed in production deployment)
+# ============================================================================
+# Keep only the converted HF adapter, ignore everything else
+
+# Training scripts
+training/*.py
+training/*.md
+training/*.txt
+training/*.json
+!training/__init__.py
+
+# Training data
+training/data/
+training/datasets/
+
+# MLX outputs (not needed, we use HF adapter)
+training/outputs/shopping_agent_lora/
+
+# Keep only HF adapter for production
+!training/outputs/shopping_agent_lora_hf/
+!training/outputs/shopping_agent_lora_hf/*.safetensors
+!training/outputs/shopping_agent_lora_hf/*.json
+
+# ============================================================================
+# Backend (Development Only)
+# ============================================================================
+# MLX planner (Mac only, not for Linux production)
+backend/mlx_planner.py
+
+# Old API files (if using api_swagger.py)
+backend/api.py
+backend/main.py
+
+# Development clients
+backend/qwen_client.py
+backend/planner.py
+
+# ============================================================================
+# Model Cache (Large, download on deployment)
+# ============================================================================
+.cache/
+*.bin
+*.safetensors
+models/
+checkpoints/
+
+# Hugging Face cache (too large, will download on server)
+.cache/huggingface/
+.cache/transformers/
+
+# Keep only the fine-tuned adapter
+!training/outputs/shopping_agent_lora_hf/*.safetensors
+
+# ============================================================================
+# Docker (Local Development)
+# ============================================================================
+# Ignore local docker compose (keep for reference but not critical)
+# docker-compose.yml is useful for local testing
+
+# Docker volumes
+postgres_data/
+model_cache/
+
+# ============================================================================
+# Database
+# ============================================================================
+*.db
+*.sqlite
+*.sqlite3
+
+# PostgreSQL backups
+*.sql
+*.dump
+
+# ============================================================================
+# Temporary Files
+# ============================================================================
+tmp/
+temp/
+*.tmp
+*.temp
+*.cache
+
+# ============================================================================
+# Git
+# ============================================================================
+.git/
+.gitattributes
+
+# ============================================================================
+# ESSENTIAL FILES FOR DEPLOYMENT (DO NOT IGNORE)
+# ============================================================================
+# These files MUST be included:
+#
+# Root:
+#   - Dockerfile                  (Container build)
+#   - docker-compose.yml          (Local testing)
+#   - README.md                   (Project overview)
+#   - DEPLOY_NOW.md               (Deployment guide)
+#   - DEPLOYMENT_ARCHITECTURE.md  (Architecture docs)
+#
+# Backend:
+#   - api_swagger.py              (Main API)
+#   - hf_planner.py               (Production planner)
+#   - search_pipeline.py          (Search logic)
+#   - db.py                       (Database)
+#   - embedding.py                (Embeddings)
+#   - tools.py                    (Helper functions)
+#   - config.py                   (Configuration)
+#   - requirements_production.txt (Dependencies)
+#   - .env.example                (Env template)
+#   - README.md                   (Backend docs)
+#   - ARCHITECTURE.md             (Architecture)
+#   - API_CONNECTION_GUIDE.md     (API usage)
+#
+# Training:
+#   - outputs/shopping_agent_lora_hf/*.safetensors  (Model adapter)
+#   - outputs/shopping_agent_lora_hf/*.json         (Adapter config)
+#
+# ============================================================================
