@@ -16,7 +16,7 @@ sentence-transformers==2.7.0
 peft==0.10.0
 accelerate==0.27.2
 safetensors==0.4.2
-bitsandbytes==0.43.0  # For 8-bit quantization on GPU
+# bitsandbytes==0.43.0  # Only needed for GPU 8-bit quantization - commented out for CPU deployment
 
 # Data handling
 numpy==1.24.3
@@ -24,6 +24,7 @@ datasets==2.18.0
 
 # Utilities
 python-dotenv==1.0.0
+gunicorn==21.2.0  # Production WSGI server
 
 # Optional: FastAPI alternative (if you want to switch from Flask)
 # fastapi==0.110.0
