@@ -1072,6 +1072,7 @@ class Health(Resource):
         
         **Response**: `200 OK` if service is healthy
         """
+        initialize()
         return {
             'status': 'healthy',
             'service': 'decathlon-shopping-assistant',
