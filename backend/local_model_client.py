@@ -266,6 +266,80 @@ class LocalModelClient:
         except Exception as e:
             logger.error(f"❌ Unexpected error: {e}")
             raise
+    
+    def embed(self, texts: list) -> list:
+        """
+        Generate embeddings for the given texts.
+        
+        Args:
+            texts: List of texts to embed
+        
+        Returns:
+            List of embeddings (each embedding is a list of floats)
+        
+        Raises:
+            ConnectionError: If cannot connect to server
+            Timeout: If request times out
+            RequestException: For other HTTP errors
+            ValueError: If response is invalid
+        """
+        try:
+            logger.info(f"📤 Sending embed request: {len(texts)} texts")
+            
+            payload = {"texts": texts}
+            
+            response = requests.post(
+                f"{self.base_url}/embed",
+                json=payload,
+                timeout=self.timeout
+            )
+            
+            # Check response status
+            if response.status_code != 200:
+                logger.error(f"❌ Embed failed: {response.status_code}")
+                logger.error(f"   Response: {response.text}")
+                raise RequestException(
+                    f"Embed failed with status {response.status_code}: {response.text}"
+                )
+            
+            # Parse response
+            result = response.json()
+            
+            # Validate structure
+            if "embeddings" not in result:
+                logger.error(f"❌ Invalid response format: {result}")
+                raise ValueError("Response missing 'embeddings' field")
+            
+            embeddings = result["embeddings"]
+            dimension = result.get("dimension", 0)
+            model_name = result.get("model", "unknown")
+            
+            logger.info("✓ Embed successful")
+            logger.info(f"   Count: {len(embeddings)}")
+            logger.info(f"   Dimension: {dimension}")
+            logger.info(f"   Model: {model_name}")
+            
+            return embeddings
+            
+        except ConnectionError as e:
+            logger.error("❌ Cannot connect to local model server")
+            logger.error(f"   URL: {self.base_url}")
+            raise ConnectionError(
+                f"Cannot connect to local model server at {self.base_url}. "
+                f"Is the server running? Is ngrok active?"
+            )
+        except Timeout as e:
+            logger.error(f"❌ Embed timeout after {self.timeout}s")
+            raise Timeout(f"Embed timeout after {self.timeout}s.")
+        except RequestException as e:
+            logger.error(f"❌ Embed request error: {e}")
+            raise
+        except ValueError as e:
+            logger.error(f"❌ Invalid response: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"❌ Unexpected error: {e}")
+            raise
 
 
 # Global singleton instance

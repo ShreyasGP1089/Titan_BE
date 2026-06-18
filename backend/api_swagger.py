@@ -11,7 +11,7 @@ import traceback
 from functools import wraps
 from tools import hybrid_search, get_categories, compare_products
 from db import initialize_pool, close_pool
-from embedding import load_model as load_embedding_model
+# NO local embedding model loading - use remote server
 import atexit
 from dotenv import load_dotenv
 
@@ -72,8 +72,8 @@ _initialized = False
 def initialize():
     """
     Initialize application resources exactly once.
-    Loads: PostgreSQL pool, embeddings
-    NO MODEL LOADING - uses remote model server instead
+    Loads: PostgreSQL pool
+    NO MODEL LOADING - uses remote model server via HTTP for ALL ML inference
     """
     global _initialized
     
@@ -82,7 +82,7 @@ def initialize():
         return
     
     logger.info("=" * 80)
-    logger.info("🔧 INITIALIZING BACKEND")
+    logger.info("🔧 INITIALIZING RENDER BACKEND (Thin API Gateway)")
     logger.info("=" * 80)
     
     try:
@@ -91,27 +91,38 @@ def initialize():
         initialize_pool(minconn=2, maxconn=20)
         logger.info("✓ PostgreSQL pool ready")
         
-        # Step 2: Embedding model
-        logger.info("2️⃣  Loading sentence-transformers embedding model...")
-        logger.info("   Model: sentence-transformers/all-MiniLM-L6-v2")
-        load_embedding_model()
-        logger.info("✓ Embedding model loaded")
-        
-        # Step 3: Test model server connection (optional)
-        logger.info("3️⃣  Testing local model server connection...")
+        # Step 2: Verify remote model server
+        logger.info("2️⃣  Verifying remote model server connection...")
         local_model_url = os.getenv('LOCAL_MODEL_URL', 'http://localhost:8001')
-        logger.info(f"   URL: {local_model_url}")
+        logger.info(f"   LOCAL_MODEL_URL: {local_model_url}")
+        logger.info("   ✓ Using remote embedding server (NO local models)")
+        logger.info("   ✓ Using remote Qwen planner (NO local models)")
+        
         try:
             client = get_model_client()
             health = client.health_check()
-            logger.info(f"✓ Model server healthy: {health.get('model', 'unknown')}")
+            logger.info(f"✓ Model server healthy")
+            logger.info(f"   LLM: {health.get('model', 'unknown')}")
+            logger.info(f"   Device: {health.get('device', 'unknown')}")
+            logger.info(f"   Adapter loaded: {health.get('adapter_loaded', False)}")
         except Exception as e:
             logger.warning(f"⚠️  Model server not reachable: {e}")
             logger.warning("   Model requests will fail until server is started")
             logger.warning("   Start with: python3 local_model_server.py")
+            logger.warning("   Expose with: ngrok http 8001")
         
         _initialized = True
-        logger.info("✓ Backend initialization complete")
+        
+        logger.info("=" * 80)
+        logger.info("✅ BACKEND READY (Thin API Gateway)")
+        logger.info("=" * 80)
+        logger.info("Memory footprint:")
+        logger.info("  • PostgreSQL client: ~50 MB")
+        logger.info("  • Flask + dependencies: ~100 MB")
+        logger.info("  • NO torch: 0 MB ✓")
+        logger.info("  • NO sentence-transformers: 0 MB ✓")
+        logger.info("  • NO Qwen model: 0 MB ✓")
+        logger.info("  Expected total: ~150-250 MB (fits in 512 MB free tier) ✓")
         logger.info("=" * 80)
         
     except Exception as e:

@@ -81,10 +81,11 @@ PORT = int(os.getenv("PORT", 8001))
 _model = None
 _tokenizer = None
 _device = None
+_embedding_model = None
 
 app = FastAPI(
     title="Local Model Server",
-    description="Qwen2.5-1.5B-Instruct + LoRA inference server",
+    description="Qwen2.5-1.5B-Instruct + LoRA + Embeddings inference server",
     version="1.0.0"
 )
 
@@ -154,6 +155,19 @@ class DebugPromptResponse(BaseModel):
     chatml_output: str
     comparison: dict
     recommendation: str
+
+
+class EmbedRequest(BaseModel):
+    """Request model for embeddings."""
+    texts: list
+
+
+class EmbedResponse(BaseModel):
+    """Response model for embeddings."""
+    embeddings: list
+    model: str
+    dimension: int
+    count: int
 
 
 def get_device():
@@ -260,19 +274,55 @@ def load_model():
     return _model, _tokenizer
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Load model on startup."""
-    logger.info("🚀 Starting Local Model Server")
-    logger.info(f"   Port: {PORT}")
-    logger.info(f"   Model: {BASE_MODEL}")
-    logger.info(f"   Adapter: {ADAPTER_PATH}")
+def load_embedding_model():
+    """Load the embedding model at startup."""
+    global _embedding_model
+    
+    if _embedding_model is not None:
+        return _embedding_model
+    
+    logger.info("=" * 80)
+    logger.info("🔤 LOADING EMBEDDING MODEL")
+    logger.info("=" * 80)
     
     try:
-        load_model()
-        logger.info("✅ Server ready for requests")
+        from sentence_transformers import SentenceTransformer
+        
+        embedding_model_name = "sentence-transformers/all-MiniLM-L6-v2"
+        logger.info(f"📥 Loading {embedding_model_name}...")
+        
+        _embedding_model = SentenceTransformer(embedding_model_name)
+        
+        logger.info(f"✓ Embedding model loaded")
+        logger.info(f"   Dimension: {_embedding_model.get_sentence_embedding_dimension()}")
+        logger.info("=" * 80)
+        
+        return _embedding_model
+        
     except Exception as e:
-        logger.error(f"❌ Failed to load model: {e}")
+        logger.error(f"❌ Embedding model loading failed: {e}")
+        raise
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Load models on startup."""
+    logger.info("🚀 Starting Local Model Server")
+    logger.info(f"   Port: {PORT}")
+    logger.info(f"   LLM: {BASE_MODEL}")
+    logger.info(f"   Adapter: {ADAPTER_PATH}")
+    logger.info(f"   Embeddings: sentence-transformers/all-MiniLM-L6-v2")
+    
+    try:
+        # Load LLM + LoRA
+        load_model()
+        
+        # Load embedding model
+        load_embedding_model()
+        
+        logger.info("✅ All models ready for requests")
+    except Exception as e:
+        logger.error(f"❌ Failed to load models: {e}")
         raise
 
 
@@ -466,6 +516,53 @@ Now parse this query:
         raise
     except Exception as e:
         logger.error(f"❌ Parse error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/embed", response_model=EmbedResponse)
+async def embed(request: EmbedRequest):
+    """
+    Generate embeddings for the given texts.
+    
+    Uses sentence-transformers/all-MiniLM-L6-v2 (384 dimensions).
+    
+    Args:
+        request: EmbedRequest with list of texts
+    
+    Returns:
+        EmbedResponse with embeddings for each text
+    """
+    try:
+        if not request.texts:
+            raise HTTPException(status_code=400, detail="texts cannot be empty")
+        
+        logger.info(f"📥 Embed request: {len(request.texts)} texts")
+        
+        embedding_model = load_embedding_model()
+        
+        # Generate embeddings
+        logger.info("⏳ Generating embeddings...")
+        embeddings = embedding_model.encode(request.texts, convert_to_numpy=True)
+        
+        # Convert to list of lists
+        embeddings_list = embeddings.tolist()
+        
+        dimension = len(embeddings_list[0]) if embeddings_list else 0
+        
+        logger.info(f"✓ Generated {len(embeddings_list)} embeddings")
+        logger.info(f"   Dimension: {dimension}")
+        
+        return EmbedResponse(
+            embeddings=embeddings_list,
+            model="sentence-transformers/all-MiniLM-L6-v2",
+            dimension=dimension,
+            count=len(embeddings_list)
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Embedding error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

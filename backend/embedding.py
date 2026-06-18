@@ -1,30 +1,22 @@
 """
-Embedding generation module.
-Uses sentence-transformers with BAAI/bge-small-en-v1.5 model.
+Embedding generation module using remote model server.
+
+This module uses the local model server (running on Mac) for embeddings.
+NO local torch, NO sentence-transformers, NO model loading.
+
+Render backend makes HTTP requests to the local server via ngrok.
 """
-from sentence_transformers import SentenceTransformer
 import logging
-from config import EMBEDDING_MODEL
+from local_model_client import get_client
 
 logger = logging.getLogger(__name__)
 
-# Global model instance (loaded once)
-_model = None
-
-
-def load_model():
-    """Load the embedding model (singleton pattern)."""
-    global _model
-    if _model is None:
-        logger.info(f"Loading embedding model: {EMBEDDING_MODEL}")
-        _model = SentenceTransformer(EMBEDDING_MODEL)
-        logger.info("Embedding model loaded successfully")
-    return _model
+logger.info("✓ Using remote embedding server (NO local model loading)")
 
 
 def get_embedding(text):
     """
-    Generate embedding for input text.
+    Generate embedding for input text using remote server.
     
     Args:
         text: Input text string
@@ -35,22 +27,19 @@ def get_embedding(text):
     if not text or not isinstance(text, str):
         raise ValueError("Input text must be a non-empty string")
     
-    model = load_model()
+    # Use remote model client
+    client = get_client()
     
-    # Generate embedding with normalization
-    embedding = model.encode(
-        text,
-        normalize_embeddings=True,
-        show_progress_bar=False
-    )
+    # Get embeddings for single text (returns list of embeddings)
+    embeddings = client.embed([text])
     
-    # Convert numpy array to list
-    return embedding.tolist()
+    # Return first (and only) embedding
+    return embeddings[0]
 
 
 def get_embeddings_batch(texts):
     """
-    Generate embeddings for multiple texts (batch processing).
+    Generate embeddings for multiple texts using remote server.
     
     Args:
         texts: List of text strings
@@ -61,13 +50,14 @@ def get_embeddings_batch(texts):
     if not texts or not isinstance(texts, list):
         raise ValueError("Input must be a non-empty list of strings")
     
-    model = load_model()
+    # Use remote model client
+    client = get_client()
     
-    embeddings = model.encode(
-        texts,
-        normalize_embeddings=True,
-        show_progress_bar=False,
-        batch_size=32
-    )
-    
-    return [emb.tolist() for emb in embeddings]
+    # Get embeddings for batch
+    return client.embed(texts)
+
+
+# NO model loading
+# NO SentenceTransformer
+# NO torch
+# All inference happens on the local server via HTTP
