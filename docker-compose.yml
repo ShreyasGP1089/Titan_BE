@@ -38,8 +38,9 @@ services:
       # API
       API_KEY: ${API_KEY:-decathlon_smart_search_2024_secure_key_abc123xyz}
       
-      # Force use of HF planner (production)
-      USE_HF_PLANNER: "true"
+      # Hugging Face model
+      HF_BASE_MODEL_NAME: Qwen/Qwen2.5-1.5B-Instruct
+      HF_ADAPTER_PATH: /app/training/outputs/qwen25_1_5b_lora_hf
       
       # Model cache (optional, speeds up model loading)
       HF_HOME: /app/.cache/huggingface

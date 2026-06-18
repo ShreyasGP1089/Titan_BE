@@ -1,0 +1,10 @@
+{
+  "model": "Qwen 2.5 3B (MLX 4-bit)",
+  "backend": "MLX (Apple Silicon optimized)",
+  "task": "E-commerce Search Planning",
+  "lora_rank": 16,
+  "iterations": 1500,
+  "learning_rate": 0.0002,
+  "training_examples": 1004,
+  "output_format": "Structured JSON for search requests"
+}

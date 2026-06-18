@@ -7,12 +7,12 @@ User Query → Fine-tuned Qwen (HF) → Structured JSON → Hybrid Search → Pr
 """
 import json
 import logging
+import os
 import re
 import torch
 from pathlib import Path
 from typing import Dict, List, Optional
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from peft import PeftModel
 
 from search_pipeline import (
     hybrid_search,
@@ -72,8 +72,11 @@ def repair_json(json_str: str) -> str:
 
 
 # Configuration
-BASE_MODEL_NAME = "Qwen/Qwen2.5-Coder-3B-Instruct"
-ADAPTER_PATH = str(Path(__file__).parent.parent / "training/outputs/shopping_agent_lora_hf")
+BASE_MODEL_NAME = os.getenv("HF_BASE_MODEL_NAME", "Qwen/Qwen2.5-1.5B-Instruct")
+ADAPTER_PATH = os.getenv(
+    "HF_ADAPTER_PATH",
+    str(Path(__file__).parent.parent / "training/outputs/qwen25_1_5b_lora_hf")
+)
 
 # Global model cache
 _model_cache = None
@@ -88,6 +91,9 @@ def get_device():
         if torch.cuda.is_available():
             _device = "cuda"
             logger.info(f"✓ Using CUDA GPU: {torch.cuda.get_device_name(0)}")
+        elif torch.backends.mps.is_available():
+            _device = "mps"
+            logger.info("✓ Using Apple Metal (MPS) GPU acceleration")
         else:
             _device = "cpu"
             logger.info("✓ Using CPU (no GPU available)")
@@ -95,51 +101,58 @@ def get_device():
 
 
 def load_fine_tuned_model():
-    """Load the fine-tuned model with LoRA adapter (cached)."""
+    """Load the base model with optional LoRA adapter."""
     global _model_cache, _tokenizer_cache
     
     if _model_cache is not None:
         return _model_cache, _tokenizer_cache
     
     device = get_device()
-    adapter_path = Path(ADAPTER_PATH)
     
     logger.info(f"Loading tokenizer from {BASE_MODEL_NAME}...")
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_NAME, trust_remote_code=True)
     
     logger.info(f"Loading base model from {BASE_MODEL_NAME}...")
-    # Load with 8-bit quantization if GPU available, otherwise full precision
-    if device == "cuda":
-        model = AutoModelForCausalLM.from_pretrained(
-            BASE_MODEL_NAME,
-            trust_remote_code=True,
-            device_map="auto",
-            load_in_8bit=True,  # 8-bit quantization for memory efficiency
-            torch_dtype=torch.float16
-        )
-    else:
-        model = AutoModelForCausalLM.from_pretrained(
-            BASE_MODEL_NAME,
-            trust_remote_code=True,
-            device_map="auto",
-            torch_dtype=torch.float32
-        )
+    logger.info("⏳ This will take 30-60 seconds on first load...")
     
-    # Load LoRA adapter if it exists
+    # Use float16 on GPU (CUDA/MPS), float32 on CPU
+    use_float16 = device in ["cuda", "mps"]
+    
+    model = AutoModelForCausalLM.from_pretrained(
+        BASE_MODEL_NAME,
+        trust_remote_code=True,
+        torch_dtype=torch.float16 if use_float16 else torch.float32,
+        low_cpu_mem_usage=True
+    )
+    
+    if device != "cpu":
+        logger.info(f"Moving model to {device}...")
+        model = model.to(device)
+    
+    # Try to load LoRA adapter (optional, with fallback)
+    adapter_path = Path(ADAPTER_PATH)
     if adapter_path.exists():
-        logger.info(f"Loading LoRA adapter from {ADAPTER_PATH}...")
-        model = PeftModel.from_pretrained(model, ADAPTER_PATH)
-        logger.info("✓ LoRA adapter loaded successfully")
+        logger.info(f"Attempting to load LoRA adapter from {ADAPTER_PATH}...")
+        try:
+            from peft import PeftModel
+            model = PeftModel.from_pretrained(model, ADAPTER_PATH)
+            logger.info("✓ LoRA adapter loaded successfully!")
+            logger.info("   Using fine-tuned Qwen2.5-1.5B adapter for better JSON parsing")
+        except Exception as e:
+            logger.warning(f"⚠️  LoRA adapter loading failed: {str(e)[:100]}")
+            logger.warning("   Continuing with base model + prompt engineering")
     else:
         logger.warning(f"⚠️  No LoRA adapter found at {ADAPTER_PATH}")
-        logger.warning("   Using base model without fine-tuning")
+        logger.warning("   Using base model + prompt engineering")
+    
+    logger.info(f"✓ Model loaded on {device.upper()}")
     
     model.eval()  # Set to evaluation mode
     
     _model_cache = model
     _tokenizer_cache = tokenizer
     
-    logger.info("✓ Model loaded and ready")
+    logger.info("✓ Model ready for inference")
     return model, tokenizer
 
 
@@ -160,8 +173,28 @@ def parse_query_with_qwen(user_query: str) -> Optional[Dict]:
         
         logger.info("Model loaded, generating response...")
         
+        # Enhanced prompt for base model to force JSON output
+        system_prompt = """You are a JSON parser for shopping queries. You MUST respond with ONLY valid JSON, no other text.
+
+Output format:
+{
+  "intent": "search" or "task",
+  "search_request": {...} (if intent is "search"),
+  "search_requests": [{...}, {...}] (if intent is "task")
+}
+
+Examples:
+Query: "running shoes under 5000"
+{"intent": "search", "search_request": {"sport": "Running", "category": "Running Shoes", "keywords": ["shoes"], "price_limit": 5000}}
+
+Query: "I want to start playing football"
+{"intent": "task", "search_requests": [{"sport": "Football", "category": "Football", "keywords": []}, {"sport": "Football", "category": "Football Shoes", "keywords": ["shoes"]}]}
+
+Now parse this query:"""
+        
         # Format prompt for fine-tuned model
         messages = [
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_query}
         ]
         
@@ -173,19 +206,23 @@ def parse_query_with_qwen(user_query: str) -> Optional[Dict]:
         )
         
         logger.info(f"Parsing query with fine-tuned Qwen: {user_query}")
+        logger.info("⏳ Generating response (this may take 30-60 seconds on CPU)...")
         
         # Tokenize
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
         
-        # Generate response
+        # Generate response with only supported parameters
+        # Reduced tokens for faster inference (256 is enough for JSON)
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=512,
+                max_new_tokens=256,  # Reduced from 512 for speed
                 do_sample=False,  # Greedy decoding for consistency
                 pad_token_id=tokenizer.eos_token_id,
                 eos_token_id=tokenizer.eos_token_id
             )
+        
+        logger.info("✓ Response generation complete")
         
         # Decode response
         full_response = tokenizer.decode(outputs[0], skip_special_tokens=False)
@@ -324,16 +361,13 @@ Provide a helpful response that:
         
         logger.info("Generating recommendations with Qwen")
         
-        # Tokenize and generate
+        # Tokenize and generate with only supported parameters
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
         
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=512,
-                do_sample=True,
-                temperature=0.7,
-                top_p=0.9,
                 pad_token_id=tokenizer.eos_token_id,
                 eos_token_id=tokenizer.eos_token_id
             )
@@ -408,7 +442,7 @@ def shopping_planner_hf(user_query: str) -> Dict:
             'intent': parsed_query.get('intent'),
             'recommendations': recommendations,
             'metadata': {
-                'model': 'Qwen 2.5 Coder 3B (Hugging Face)',
+                'model': 'Qwen2.5-1.5B-Instruct (Hugging Face + PEFT)',
                 'device': device,
                 'search_type': 'hybrid',
                 'products_found': len(search_results.get('products', []))

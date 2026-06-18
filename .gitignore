@@ -11,6 +11,13 @@ __pycache__/
 *$py.class
 *.so
 .Python
+
+# Backup files
+*_backup.py
+*_BACKUP.py
+*_OLD_BACKUP.py
+*_FIXED.py
+*.backup
 build/
 develop-eggs/
 dist/
@@ -107,26 +114,31 @@ coverage.xml
 backend/test_*.py
 backend/*_test.py
 
+# Temporary test scripts created during debugging
+backend/test_base_model.py
+
 # ============================================================================
 # Documentation (Redundant/Internal)
 # ============================================================================
-# Keep only essential deployment docs, ignore internal/development docs
+# Keep essential deployment docs, ignore redundant/outdated ones
 
-# Internal development docs
+# Old internal development docs (outdated)
 CLEANUP_SUMMARY.md
 IMPLEMENTATION_COMPLETE.txt
 REFACTORING_COMPLETE.md
 MIGRATION_SUMMARY.md
 DOCUMENTATION_INDEX.md
 
-# Redundant deployment guides (keep only DEPLOY_NOW.md and README.md)
+# Redundant/old deployment guides (we have better ones now)
 DEPLOYMENT_README.md
 PRODUCTION_DEPLOYMENT.md
 PRODUCTION_READY.md
 READY_TO_DEPLOY.txt
 DEPLOYMENT_QUICK_REFERENCE.md
+RENDER_DEPLOY_FIXES.md
+DEPLOYMENT_FILES.md
 
-# Backend redundant docs
+# Backend redundant docs (covered by main docs)
 backend/QUICKSTART.md
 backend/SETUP.md
 backend/SUCCESS_GUIDE.md
@@ -140,18 +152,37 @@ backend/DEPLOYMENT.md
 API_GUIDE.md
 backend/OPENAPI_CONFIG.json
 
+# KEEP THESE NEW DOCS (essential for deployment):
+# - FINAL_SUMMARY.md
+# - DEPLOY_CHECKLIST.md
+# - DEPLOYMENT_STATUS.md
+# - CHANGES_SUMMARY.md
+# - QUICK_REFERENCE.md
+# - verify_deployment_ready.sh
+# - README.md
+# - DEPLOYMENT_ARCHITECTURE.md
+
 # ============================================================================
 # Scripts (Development/Testing Only)
 # ============================================================================
+# Old/redundant scripts only - keep the new verification script
+
+# Old verification scripts
 verify_production_ready.sh
 quick_verify.sh
+
+# Development helper scripts
 backend/generate_cert.sh
 backend/example_client.html
 
+# KEEP THESE:
+# - verify_deployment_ready.sh (new, essential for pre-deployment checks)
+# - deploy.sh (if exists)
+
 # ============================================================================
-# Training (Not needed in production deployment)
+# Training (not needed in production deployment)
 # ============================================================================
-# Keep only the converted HF adapter, ignore everything else
+# Keep only the production Qwen3 HF adapter, ignore everything else
 
 # Training scripts
 training/*.py
@@ -159,18 +190,23 @@ training/*.md
 training/*.txt
 training/*.json
 !training/__init__.py
+!training/train_hf.py
+!training/requirements.txt
 
 # Training data
 training/data/
 training/datasets/
 
-# MLX outputs (not needed, we use HF adapter)
+# Legacy MLX / conversion outputs (backup only, not production)
 training/outputs/shopping_agent_lora/
+training/outputs/shopping_agent_lora_hf/
+training/outputs/qwen25_3b_instruct_lora_hf/
+training/outputs/qwen3_4b_lora/
 
-# Keep only HF adapter for production
-!training/outputs/shopping_agent_lora_hf/
-!training/outputs/shopping_agent_lora_hf/*.safetensors
-!training/outputs/shopping_agent_lora_hf/*.json
+# Keep only Qwen3 HF adapter for production
+!training/outputs/qwen3_4b_hf/
+!training/outputs/qwen3_4b_hf/*.safetensors
+!training/outputs/qwen3_4b_hf/*.json
 
 # ============================================================================
 # Backend (Development Only)
@@ -199,8 +235,8 @@ checkpoints/
 .cache/huggingface/
 .cache/transformers/
 
-# Keep only the fine-tuned adapter
-!training/outputs/shopping_agent_lora_hf/*.safetensors
+# Keep only the production fine-tuned adapter
+!training/outputs/qwen3_4b_hf/*.safetensors
 
 # ============================================================================
 # Docker (Local Development)
@@ -265,7 +301,7 @@ temp/
 #   - API_CONNECTION_GUIDE.md     (API usage)
 #
 # Training:
-#   - outputs/shopping_agent_lora_hf/*.safetensors  (Model adapter)
-#   - outputs/shopping_agent_lora_hf/*.json         (Adapter config)
+#   - outputs/qwen3_4b_hf/*.safetensors  (Qwen3 PEFT adapter)
+#   - outputs/qwen3_4b_hf/*.json         (Adapter config)
 #
 # ============================================================================

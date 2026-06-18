@@ -1,12 +1,12 @@
 # Decathlon Smart Search System
 
-> **Fine-tuned Qwen 3:4B + Hybrid Search + PostgreSQL + pgvector**
+> **Fine-tuned Qwen2.5-1.5B-Instruct + Hybrid Search + PostgreSQL + pgvector**
 
 Complete AI-powered conversational commerce backend for e-commerce product search.
 
 ## 🎯 What This Is
 
-- **Fine-tuned LLM** (Qwen 3:4B with LoRA) for query understanding
+- **Fine-tuned LLM** (Qwen2.5-1.5B-Instruct with LoRA) for query understanding
 - **Hybrid Search** (Keyword filtering + Semantic ranking with pgvector)
 - **Vector Database** (PostgreSQL with 8,829 products)
 - **REST API** (Flask + Swagger documentation)

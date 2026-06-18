@@ -1,0 +1,22 @@
+{
+  "base_model": "Qwen/Qwen2.5-1.5B-Instruct",
+  "framework": "Hugging Face Transformers + PEFT",
+  "quantization": "LoRA",
+  "task": "E-commerce Search Planning",
+  "lora_rank": 8,
+  "lora_alpha": 16,
+  "target_modules": [
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj"
+  ],
+  "epochs": 1,
+  "learning_rate": 5e-05,
+  "batch_size": 1,
+  "training_examples": 1004,
+  "output_format": "Structured JSON for search requests"
+}

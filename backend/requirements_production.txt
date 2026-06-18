@@ -10,12 +10,12 @@ flask-restx==1.3.0
 psycopg2-binary==2.9.9
 
 # ML/NLP - Hugging Face Stack
-transformers==4.40.0
-torch==2.2.0
+transformers>=4.51.0
+torch>=2.2.0
 sentence-transformers==2.7.0
-peft==0.10.0
-accelerate==0.27.2
-safetensors==0.4.2
+peft>=0.10.0  # For LoRA adapter support
+accelerate>=0.27.2
+safetensors>=0.4.2
 # bitsandbytes==0.43.0  # Only needed for GPU 8-bit quantization - commented out for CPU deployment
 
 # Data handling
