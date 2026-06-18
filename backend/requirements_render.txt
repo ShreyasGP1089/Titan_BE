@@ -1,0 +1,22 @@
+# Render Backend Requirements (Lightweight - No LLM)
+# For 512 MB RAM free tier
+
+# Database
+psycopg2-binary==2.9.9
+
+# Embeddings (lightweight)
+sentence-transformers==2.7.0
+
+# API Framework
+flask==3.0.0
+flask-cors==4.0.0
+flask-restx==1.3.0
+
+# HTTP Client
+requests==2.31.0
+
+# Utilities
+python-dotenv==1.0.0
+numpy==1.24.3
+
+# Note: NO torch, transformers, peft - those run on local server only

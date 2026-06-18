@@ -23,10 +23,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Production uses HuggingFace Qwen2.5-1.5B-Instruct with LoRA fine-tuning
-logger.info("🚀 Starting API with HuggingFace Qwen2.5-1.5B-Instruct")
-from hf_planner import shopping_planner_hf, parse_query_with_qwen, load_fine_tuned_model
-logger.info("✓ HuggingFace planner imported successfully")
+# Production uses Local Model Server (Mac) via HTTP
+logger.info("🚀 Starting API with Local Model Server (HTTP)")
+logger.info(f"   Model Server URL: {os.getenv('LOCAL_MODEL_URL', 'http://localhost:8001')}")
+from hf_planner import shopping_planner_hf, parse_query_with_local_model
+from local_model_client import get_client as get_model_client
+logger.info("✓ Local model client imported successfully")
 
 API_KEY = os.getenv('API_KEY', 'decathlon_smart_search_2024_secure_key_abc123xyz')
 
@@ -51,7 +53,7 @@ api = Api(
     app,
     version='1.0.0',
     title='Decathlon Smart Shopping API',
-    description='AI-powered shopping search with Qwen2.5-1.5B-Instruct + PostgreSQL + pgvector',
+    description='AI-powered shopping search with Local Model Server + PostgreSQL + pgvector',
     doc='/docs',
     prefix='/api/v1',
     authorizations={
@@ -66,14 +68,14 @@ api = Api(
 
 # Global initialization flags
 _initialized = False
-_model_loaded = False
 
 def initialize():
     """
     Initialize application resources exactly once.
-    Loads: PostgreSQL pool, embeddings, HF model
+    Loads: PostgreSQL pool, embeddings
+    NO MODEL LOADING - uses remote model server instead
     """
-    global _initialized, _model_loaded
+    global _initialized
     
     if _initialized:
         logger.debug("⏭️  Already initialized, skipping...")
@@ -91,9 +93,22 @@ def initialize():
         
         # Step 2: Embedding model
         logger.info("2️⃣  Loading sentence-transformers embedding model...")
-        logger.info("   Model: BAAI/bge-small-en-v1.5")
+        logger.info("   Model: sentence-transformers/all-MiniLM-L6-v2")
         load_embedding_model()
         logger.info("✓ Embedding model loaded")
+        
+        # Step 3: Test model server connection (optional)
+        logger.info("3️⃣  Testing local model server connection...")
+        local_model_url = os.getenv('LOCAL_MODEL_URL', 'http://localhost:8001')
+        logger.info(f"   URL: {local_model_url}")
+        try:
+            client = get_model_client()
+            health = client.health_check()
+            logger.info(f"✓ Model server healthy: {health.get('model', 'unknown')}")
+        except Exception as e:
+            logger.warning(f"⚠️  Model server not reachable: {e}")
+            logger.warning("   Model requests will fail until server is started")
+            logger.warning("   Start with: python3 local_model_server.py")
         
         _initialized = True
         logger.info("✓ Backend initialization complete")
@@ -105,51 +120,6 @@ def initialize():
         logger.error("=" * 80)
         logger.error(f"Error: {e}")
         logger.error(traceback.format_exc())
-        raise
-
-def initialize_model():
-    """
-    Pre-load the fine-tuned HF model (separate from basic initialization).
-    This is optional and can be deferred to first use.
-    """
-    global _model_loaded
-    
-    if _model_loaded:
-        logger.debug("⏭️  Model already loaded, skipping...")
-        return
-    
-    logger.info("=" * 80)
-    logger.info("🤖 LOADING FINE-TUNED MODEL")
-    logger.info("=" * 80)
-    
-    try:
-        logger.info("📦 Loading Qwen2.5-1.5B-Instruct with LoRA adapter...")
-        logger.info("   Using: HuggingFace + PEFT")
-        logger.info("   Adapter: training/outputs/qwen25_1_5b_lora_hf/")
-        
-        load_fine_tuned_model()
-        
-        _model_loaded = True
-        logger.info("✓ Fine-tuned model loaded and ready")
-        logger.info("=" * 80)
-        
-    except FileNotFoundError as e:
-        logger.error("=" * 80)
-        logger.error("❌ MODEL NOT FOUND")
-        logger.error("=" * 80)
-        logger.error(f"Error: {e}")
-        logger.error("The fine-tuned LoRA adapter was not found")
-        logger.error("Expected: training/outputs/qwen3_4b_hf/")
-        _model_loaded = False
-        raise
-        
-    except Exception as e:
-        logger.error("=" * 80)
-        logger.error("❌ MODEL LOADING FAILED")
-        logger.error("=" * 80)
-        logger.error(f"Error: {e}")
-        logger.error(traceback.format_exc())
-        _model_loaded = False
         raise
 
 atexit.register(close_pool)
@@ -267,15 +237,14 @@ class SmartSearch(Resource):
     @require_api_key
     def post(self):
         """
-        AI-powered smart search with Qwen2.5-1.5B-Instruct
+        AI-powered smart search with Local Model Server
         
         Pipeline:
-        1. Qwen2.5-1.5B-Instruct parses query → Structured JSON
+        1. Local Model Server parses query → Structured JSON
         2. Hybrid search: Keyword + Semantic (pgvector)
-        3. Qwen2.5-1.5B-Instruct generates natural language response
+        3. Local Model Server generates natural language response
         """
         initialize()
-        initialize_model()
         
         try:
             data = request.get_json()
@@ -340,7 +309,7 @@ class ParseQuery(Resource):
         """
         Parse natural language query to structured JSON
         
-        Uses fine-tuned Qwen2.5-1.5B-Instruct to extract:
+        Uses Local Model Server (Qwen2.5-1.5B-Instruct) to extract:
         - Sport category
         - Product category
         - Keywords
@@ -348,7 +317,6 @@ class ParseQuery(Resource):
         - Experience level
         """
         initialize()
-        initialize_model()
         
         try:
             data = request.get_json()
@@ -366,8 +334,8 @@ class ParseQuery(Resource):
             import time
             start_time = time.time()
             
-            logger.info("📤 Calling parse_query_with_qwen...")
-            parsed_query = parse_query_with_qwen(user_query)
+            logger.info("📤 Calling parse_query_with_local_model...")
+            parsed_query = parse_query_with_local_model(user_query)
             logger.info("📥 Parse function returned")
             
             parse_time_ms = int((time.time() - start_time) * 1000)
@@ -385,7 +353,7 @@ class ParseQuery(Resource):
                 'parsed_query': parsed_query,
                 'intent': parsed_query.get('intent', 'unknown'),
                 'metadata': {
-                    'model': 'Qwen2.5-1.5B-Instruct (HuggingFace + PEFT)',
+                    'model': 'Qwen2.5-1.5B-Instruct (Local Server)',
                     'parse_time_ms': parse_time_ms
                 }
             }
@@ -434,23 +402,10 @@ class Health(Resource):
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
-    preload_model = os.environ.get("PRELOAD_MODEL", "false").lower() == "true"
     
     logger.info(f"🚀 Starting Flask app on 0.0.0.0:{port}")
-    logger.info(f"   PRELOAD_MODEL={preload_model}")
-    
-    # Optional: Pre-load model at startup
-    if preload_model:
-        logger.info("🤖 Pre-loading model at startup...")
-        try:
-            initialize()
-            initialize_model()
-            logger.info("✓ Model pre-loaded successfully")
-        except Exception as e:
-            logger.error(f"⚠️  Model pre-load failed: {e}")
-            logger.info("   Model will load on first request instead")
-    else:
-        logger.info("⏭️  Skipping model pre-load (will load on first request)")
+    logger.info("   Model inference via LOCAL_MODEL_URL (no local model loading)")
+    logger.info(f"   LOCAL_MODEL_URL={os.getenv('LOCAL_MODEL_URL', 'http://localhost:8001')}")
     
     app.run(
         host="0.0.0.0",
