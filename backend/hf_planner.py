@@ -22,6 +22,41 @@ from search_pipeline import (
 logger = logging.getLogger(__name__)
 
 
+def deduplicate_search_requests(search_requests: List[Dict]) -> List[Dict]:
+    """
+    Remove duplicate search requests based on (sport, category) pairs.
+    
+    Args:
+        search_requests: List of search request dicts
+    
+    Returns:
+        Deduplicated list of search requests
+    """
+    if not search_requests:
+        return []
+    
+    seen = set()
+    unique = []
+    
+    for item in search_requests:
+        # Create key from sport and category
+        key = (
+            item.get("sport"),
+            item.get("category")
+        )
+        
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+        else:
+            logger.warning(f"Removing duplicate search request: {key}")
+    
+    if len(unique) < len(search_requests):
+        logger.info(f"Deduplicated search_requests: {len(search_requests)} → {len(unique)}")
+    
+    return unique
+
+
 def repair_json(json_str: str) -> str:
     """
     Attempt to repair common JSON syntax errors from LLM output.
@@ -117,9 +152,13 @@ def execute_search(parsed_query: Dict) -> Dict:
     """
     intent = parsed_query.get('intent')
     
+    logger.info(f"DEBUG - execute_search: intent={intent}")
+    
     if intent == 'search':
         # Single search request
         search_req = parsed_query.get('search_request', {})
+        
+        logger.info(f"DEBUG - Single search request: sport={search_req.get('sport')}, category={search_req.get('category')}")
         
         results = hybrid_search(
             sport=search_req.get('sport'),
@@ -139,6 +178,15 @@ def execute_search(parsed_query: Dict) -> Dict:
     elif intent == 'task':
         # Multiple search requests
         search_requests = parsed_query.get('search_requests', [])
+        
+        logger.info(f"DEBUG - Task search requests (before dedupe): {len(search_requests)}")
+        for i, sr in enumerate(search_requests):
+            logger.info(f"  {i+1}. sport={sr.get('sport')}, category={sr.get('category')}")
+        
+        # Deduplicate search requests
+        search_requests = deduplicate_search_requests(search_requests)
+        
+        logger.info(f"DEBUG - Task search requests (after dedupe): {len(search_requests)}")
         
         task_results = search_task(search_requests)
         
@@ -226,6 +274,9 @@ def shopping_planner_hf(user_query: str) -> Dict:
     
     try:
         # Step 1: Parse query with local model
+        logger.info("=" * 80)
+        logger.info("STEP 1: PARSE QUERY")
+        logger.info("=" * 80)
         parsed_query = parse_query_with_local_model(user_query)
         
         if not parsed_query:
@@ -235,17 +286,43 @@ def shopping_planner_hf(user_query: str) -> Dict:
                 'user_query': user_query
             }
         
+        logger.info(f"DEBUG - Parsed query: {json.dumps(parsed_query, indent=2)}")
+        
+        # Safety: Deduplicate search_requests in parsed_query if present
+        if parsed_query.get('intent') == 'task' and 'search_requests' in parsed_query:
+            original_count = len(parsed_query['search_requests'])
+            parsed_query['search_requests'] = deduplicate_search_requests(parsed_query['search_requests'])
+            if len(parsed_query['search_requests']) < original_count:
+                logger.warning(f"Deduplicated parsed_query search_requests: {original_count} → {len(parsed_query['search_requests'])}")
+        
         # Step 2: Execute search
+        logger.info("=" * 80)
+        logger.info("STEP 2: EXECUTE SEARCH")
+        logger.info("=" * 80)
         search_results = execute_search(parsed_query)
         
+        products_count = len(search_results.get('products', [])) if 'products' in search_results else 0
+        logger.info(f"DEBUG - Products returned: {products_count}")
+        logger.info(f"DEBUG - Search results keys: {list(search_results.keys())}")
+        
         # Step 3: Generate recommendations
+        logger.info("=" * 80)
+        logger.info("STEP 3: GENERATE RECOMMENDATIONS")
+        logger.info("=" * 80)
         recommendations = generate_recommendations(
             user_query=user_query,
             parsed_query=parsed_query,
             search_results=search_results
         )
         
+        logger.info(f"DEBUG - Recommendations type: {type(recommendations)}")
+        logger.info(f"DEBUG - Recommendations preview: {str(recommendations)[:200]}...")
+        
         # Build response
+        logger.info("=" * 80)
+        logger.info("STEP 4: BUILD RESPONSE")
+        logger.info("=" * 80)
+        
         response = {
             'status': 'success',
             'user_query': user_query,
@@ -265,7 +342,10 @@ def shopping_planner_hf(user_query: str) -> Dict:
         elif parsed_query.get('intent') == 'task':
             response['products_by_category'] = search_results.get('products_by_category', {})
         
+        logger.info(f"DEBUG - Response keys: {list(response.keys())}")
+        logger.info(f"DEBUG - Response recommendations type: {type(response['recommendations'])}")
         logger.info(f"✓ Query processed successfully: {response['metadata']['products_found']} products found")
+        logger.info("=" * 80)
         
         return response
         

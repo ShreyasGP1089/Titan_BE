@@ -160,12 +160,38 @@ parse_query_request = api.model('ParseQueryRequest', {
 
 product_model = api.model('Product', {
     'product_id': fields.String(description='Product ID'),
-    'name': fields.String(description='Product name'),
-    'brand': fields.String(description='Brand'),
-    'price': fields.Float(description='Price in INR'),
-    'sport': fields.String(description='Sport category'),
-    'rating': fields.Float(description='Rating (0-5)'),
-    'similarity_score': fields.Float(description='Similarity (0-1)')
+
+    'name': fields.String(
+        description='Product name'
+    ),
+
+    'brand': fields.String(
+        description='Brand'
+    ),
+
+    'price': fields.Float(
+        description='Price in INR'
+    ),
+
+    'sport': fields.String(
+        description='Sport category'
+    ),
+
+    'rating': fields.Float(
+        description='Rating (0-5)'
+    ),
+
+    'image_url': fields.String(
+        description='Product image URL'
+    ),
+
+    'product_url': fields.String(
+        description='Product webpage URL'
+    ),
+
+    'similarity_score': fields.Float(
+        description='Similarity (0-1)'
+    )
 })
 
 search_response = api.model('SearchResponse', {
@@ -179,7 +205,7 @@ smart_search_response = api.model('SmartSearchResponse', {
     'user_query': fields.String(description='Original query'),
     'parsed_query': fields.Raw(description='Structured query'),
     'intent': fields.String(description='Intent', example='search'),
-    'recommendations': fields.String(description='AI recommendations'),
+    'recommendations': fields.Raw(description='AI recommendations'),
     'products': fields.List(fields.Nested(product_model)),
     'metadata': fields.Raw(description='Metadata')
 })
