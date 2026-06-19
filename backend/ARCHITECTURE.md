@@ -1,8 +1,8 @@
 # Architecture Documentation
 
-Detailed architecture and design decisions for the Decathlon Smart Search System with Fine-tuned Qwen 3:4B.
+Detailed architecture and design decisions for the Decathlon Smart Search System with Fine-tuned Qwen2.5-1.5B-Instruct.
 
-## System Architecture
+## System Architecture (Split Architecture - Render + Mac)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -13,90 +13,120 @@ Detailed architecture and design decisions for the Decathlon Smart Search System
                                 │ HTTP/REST
                                 ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                   API LAYER (Flask + Swagger)                    │
+│              API LAYER (Flask + Swagger) - RENDER                │
+│                   Thin API Gateway (512 MB RAM)                  │
 │                      api_swagger.py                              │
 │  ┌──────────────┬───────────────┬──────────────┐               │
 │  │/parse-query  │/hybrid-search │/smart-search │               │
 │  │(JSON only)   │(Products)     │(Complete)    │               │
 │  └──────────────┴───────────────┴──────────────┘               │
+│                                                                  │
+│  Memory Usage: ~200 MB                                          │
+│  • PostgreSQL client: 50 MB                                     │
+│  • Flask + deps: 100 MB                                         │
+│  • NO torch: 0 MB ✓                                             │
+│  • NO models: 0 MB ✓                                            │
 └───────────────────────────────┬─────────────────────────────────┘
                                 │
-                                │ Function Calls
+                                │ HTTP via ngrok
                                 ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                    MLX PLANNER LAYER                             │
-│                     mlx_planner.py                               │
+│           LOCAL MODEL SERVER - MAC (Apple Silicon)               │
+│                   All ML Models (Port 8001)                      │
+│                  local_model_server.py                           │
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────┐        │
+│  │  Qwen2.5-1.5B-Instruct + LoRA (~1,500 MB)          │        │
+│  │  • Model: Qwen/Qwen2.5-1.5B-Instruct               │        │
+│  │  • Adapter: training/outputs/qwen25_1_5b_lora_hf/  │        │
+│  │  • Device: MPS (Apple Silicon GPU)                  │        │
+│  │  • Endpoints: /parse-query, /generate              │        │
+│  └─────────────────────────────────────────────────────┘        │
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────┐        │
+│  │  SentenceTransformer (~300 MB)                      │        │
+│  │  • Model: all-MiniLM-L6-v2                          │        │
+│  │  • Dimension: 384                                    │        │
+│  │  • Endpoint: /embed                                  │        │
+│  └─────────────────────────────────────────────────────┘        │
+│                                                                  │
+│  Total Memory: ~1,900 MB                                        │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+                                │ Results
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    PLANNER LAYER - RENDER                        │
+│                     hf_planner.py                                │
 │                                                                  │
 │  ┌────────────────────────────────────────────────────┐         │
 │  │         Smart Search Pipeline                      │         │
 │  │                                                     │         │
-│  │  1. Parse query with fine-tuned Qwen              │         │
-│  │  2. Execute hybrid search                          │         │
-│  │  3. Generate recommendations with Qwen            │         │
+│  │  1. Parse query with Qwen (via HTTP)              │         │
+│  │  2. Execute hybrid search (local)                  │         │
+│  │  3. Generate recommendations with Qwen (via HTTP)  │         │
 │  │  4. Return complete response                       │         │
 │  └────────────────────────────────────────────────────┘         │
+│                                                                  │
+│  local_model_client.py - HTTP client for Mac server             │
 └─────┬──────────────────────┬──────────────────────┬────────────┘
       │                      │                      │
-      │ MLX Inference        │ Search               │ Embeddings
+      │ HTTP Client          │ Search               │ HTTP Client
       ▼                      ▼                      ▼
 ┌──────────────────┐  ┌──────────────────┐  ┌─────────────────────┐
-│  FINE-TUNED MLX  │  │  SEARCH PIPELINE │  │  EMBEDDING LAYER    │
-│  mlx_planner.py  │  │search_pipeline.py│  │   embedding.py      │
+│  LOCAL MODEL     │  │  SEARCH PIPELINE │  │  LOCAL MODEL        │
+│  CLIENT (HTTP)   │  │search_pipeline.py│  │  CLIENT (HTTP)      │
 │                  │  │                  │  │                     │
 │ ┌──────────────┐ │  │ ┌──────────────┐ │  │ ┌─────────────────┐ │
-│ │ Qwen 3:4B    │ │  │ │keyword_search│ │  │ │BAAI/bge-small   │ │
-│ │ + LoRA       │ │  │ │semantic_rank │ │  │ │  (384 dims)     │ │
-│ │ (MLX)        │ │  │ │hybrid_search │ │  │ │  Normalized     │ │
-│ │              │ │  │ │search_task   │ │  │ └─────────────────┘ │
-│ │ - Parse      │ │  │ └──────────────┘ │  │                     │
-│ │ - Recommend  │ │  │                  │  │                     │
+│ │parse_query() │ │  │ │keyword_search│ │  │ │embed()          │ │
+│ │generate()    │ │  │ │semantic_rank │ │  │ │                 │ │
+│ │              │ │  │ │hybrid_search │ │  │ │  Calls:         │ │
+│ │Calls:        │ │  │ │search_task   │ │  │ │  POST /embed    │ │
+│ │POST /parse-  │ │  │ └──────────────┘ │  │ └─────────────────┘ │
+│ │  query       │ │  │                  │  │                     │
+│ │POST /generate│ │  │                  │  │                     │
 │ └──────────────┘ │  │                  │  │                     │
-│ Model: 25MB      │  │                  │  │                     │
-│ Location:        │  │                  │  │                     │
-│ training/outputs/│  │                  │  │                     │
-│ shopping_agent_  │  │                  │  │                     │
-│ lora/            │  │                  │  │                     │
-└──────┬───────────┘  └────────┬─────────┘  └──────────┬──────────┘
-       │                       │                        │
-       │ Pre-loaded on         │ SQL Queries            │
-       │ API startup           │                        │
-       │                       ▼                        │
-       │            ┌──────────────────────┐            │
-       │            │   DATABASE LAYER     │            │
-       │            │       db.py          │            │
-       │            │                      │            │
-       │            │ ┌──────────────────┐ │            │
-       │            │ │Connection Pooling│ │            │
-       │            │ │   (psycopg2)     │ │            │
-       │            │ └──────────────────┘ │            │
-       │            └──────────┬───────────┘            │
-       │                       │                        │
-       │                       │ psycopg2               │
-       │                       ▼                        │
-       │            ┌──────────────────────┐            │
-       │            │    PostgreSQL        │            │
-       │            │    + pgvector        │            │
-       │            │                      │            │
-       │            │  ┌────────────────┐  │            │
-       │            │  │   products     │  │            │
-       │            │  │   (8,829 rows) │  │            │
-       │            │  └────────────────┘  │            │
-       │            │  ┌────────────────┐  │            │
-       │            │  │product_embeddi-│  │◄───────────┘
-       │            │  │ngs (vector384) │  │  Vector Similarity
-       │            │  │  HNSW Index    │  │
-       │            │  └────────────────┘  │
-       │            └──────────────────────┘
-       │
-       │ No external Ollama needed!
-       │ Model runs via Apple MLX
-       └────────────────────────────────────
+│                  │  │                  │  │                     │
+│ NO local models  │  │                  │  │ NO local models     │
+│ HTTP only        │  │                  │  │ HTTP only           │
+└──────────────────┘  └────────┬─────────┘  └─────────────────────┘
+                               │
+                               │ SQL Queries
+                               ▼
+                    ┌──────────────────────┐
+                    │   DATABASE LAYER     │
+                    │       db.py          │
+                    │                      │
+                    │ ┌──────────────────┐ │
+                    │ │Connection Pooling│ │
+                    │ │   (psycopg2)     │ │
+                    │ └──────────────────┘ │
+                    └──────────┬───────────┘
+                               │
+                               │ psycopg2
+                               ▼
+                    ┌──────────────────────┐
+                    │    PostgreSQL        │
+                    │    + pgvector        │
+                    │                      │
+                    │  ┌────────────────┐  │
+                    │  │   products     │  │
+                    │  │   (8,829 rows) │  │
+                    │  └────────────────┘  │
+                    │  ┌────────────────┐  │
+                    │  │product_embeddi-│  │
+                    │  │ngs (vector384) │  │
+                    │  │  HNSW Index    │  │
+                    │  └────────────────┘  │
+                    └──────────────────────┘
 ```
 
 ## Component Description
 
-### 1. API Layer (`api_swagger.py`)
-**Responsibility**: REST API interface with Swagger documentation
+### 1. API Layer (`api_swagger.py`) - RENDER
+**Responsibility**: REST API interface with Swagger documentation  
+**Location**: Render free tier (512 MB RAM)  
+**Memory**: ~200 MB
 
 **Three Main Endpoints**:
 
@@ -104,19 +134,19 @@ Detailed architecture and design decisions for the Decathlon Smart Search System
    - Input: Natural language query
    - Output: Structured JSON only
    - Purpose: Test model, custom integration
-   - Speed: ~500ms
+   - Speed: ~1-2s (HTTP to Mac)
 
 2. **`POST /api/v1/shopping/hybrid-search`**
    - Input: Structured JSON (from parse-query or manual)
    - Output: Products with similarity scores
    - Purpose: Fast search with pre-parsed query
-   - Speed: ~100ms
+   - Speed: ~300ms (includes embedding via HTTP)
 
 3. **`POST /api/v1/shopping/smart-search`**
    - Input: Natural language query
    - Output: JSON + Products + Recommendations
    - Purpose: Complete AI shopping experience
-   - Speed: ~1-2s
+   - Speed: ~2-4s (includes 2 HTTP calls to Mac)
 
 **Additional Endpoints**:
 - `GET /api/v1/system/health` - Health check
@@ -125,45 +155,129 @@ Detailed architecture and design decisions for the Decathlon Smart Search System
 
 **Technologies**: Flask, Flask-RESTX, CORS
 
-**Key Feature**: Model pre-loads on startup (no cold start)
+**Key Feature**: NO model loading - thin API gateway
 
-### 2. MLX Planner Layer (`mlx_planner.py`)
-**Responsibility**: Fine-tuned model integration and orchestration
+---
+
+### 2. Local Model Server (`local_model_server.py`) - MAC
+**Responsibility**: All ML model inference  
+**Location**: Mac with Apple Silicon (M1/M2/M3/M4/M5)  
+**Memory**: ~1,900 MB
+
+**Endpoints**:
+
+1. **`POST /parse-query`**
+   - Input: `{"query": "running shoes under 5000"}`
+   - Output: `{"intent": "search", "search_request": {...}}`
+   - Model: Qwen2.5-1.5B-Instruct + LoRA
+   - Device: MPS (Apple Silicon)
+   - Time: ~1-2s
+
+2. **`POST /generate`**
+   - Input: `{"prompt": "...", "max_new_tokens": 512}`
+   - Output: `{"response": "..."}`
+   - Model: Qwen2.5-1.5B-Instruct + LoRA
+   - Time: ~1-2s
+
+3. **`POST /embed`**
+   - Input: `{"texts": ["text1", "text2"]}`
+   - Output: `{"embeddings": [[...], [...]], "dimension": 384}`
+   - Model: sentence-transformers/all-MiniLM-L6-v2
+   - Time: ~50-100ms
+
+4. **`GET /health`**
+   - Health check endpoint
+   - Returns model status
+
+**Model Details**:
+- **LLM**: Qwen/Qwen2.5-1.5B-Instruct
+  - Base model: ~1,500 MB (FP16)
+  - LoRA adapter: ~35 MB
+  - Location: `training/outputs/qwen25_1_5b_lora_hf/`
+  - Device: MPS (Apple Silicon GPU)
+  - Format: ChatML (no system prompts)
+- **Embeddings**: sentence-transformers/all-MiniLM-L6-v2
+  - Size: ~300 MB
+  - Dimension: 384
+  - Normalized embeddings
+
+**Technologies**: FastAPI, PyTorch, Transformers, PEFT, sentence-transformers
+
+---
+
+### 3. Local Model Client (`local_model_client.py`) - RENDER
+**Responsibility**: HTTP client for calling Mac server  
+**Location**: Render backend
 
 **Key Functions**:
 
-1. **`load_fine_tuned_model()`**
-   - Loads Qwen 3:4B + LoRA adapter
-   - Cached (loaded once)
-   - Location: `training/outputs/shopping_agent_lora/`
+1. **`get_client()`**
+   - Returns singleton client instance
+   - Configured with `LOCAL_MODEL_URL` (ngrok URL)
+   - Timeout: 120s
 
-2. **`parse_query_with_qwen(user_query)`**
-   - Converts natural language → Structured JSON
-   - Uses fine-tuned model
-   - Returns: `{"intent": "search|task", "search_request": {...}}`
+2. **`client.parse_query(query)`**
+   - Calls `POST /parse-query` on Mac server
+   - Returns: `{"intent": "...", "search_request": {...}}`
 
-3. **`generate_recommendations(user_query, products)`**
-   - Takes products from search
-   - Generates natural language recommendations
-   - Uses fine-tuned model
+3. **`client.generate(prompt, max_new_tokens)`**
+   - Calls `POST /generate` on Mac server
+   - Returns: Generated text string
 
-4. **`shopping_planner_mlx(user_query)`**
+4. **`client.embed(texts)`**
+   - Calls `POST /embed` on Mac server
+   - Returns: List of embedding vectors
+
+5. **`client.health_check()`**
+   - Calls `GET /health`
+   - Returns: Server health status
+
+**Configuration**:
+- `LOCAL_MODEL_URL`: ngrok URL (e.g., `https://xxxx.ngrok-free.app`)
+- `MODEL_REQUEST_TIMEOUT`: 120 seconds
+
+**Error Handling**:
+- Connection errors
+- Timeouts
+- HTTP errors
+- Invalid responses
+
+---
+
+### 4. Planner Layer (`hf_planner.py`) - RENDER
+**Responsibility**: Orchestration and deduplication
+
+**Key Functions**:
+
+1. **`deduplicate_search_requests(search_requests)`**
+   - Removes duplicate (sport, category) pairs
+   - Applied at parsing and search stages
+   - Logs warnings when duplicates removed
+
+2. **`parse_query_with_local_model(user_query)`**
+   - Calls local model client
+   - Returns structured JSON
+   - Includes deduplication
+
+3. **`execute_search(parsed_query)`**
+   - Keyword search → candidates
+   - Semantic ranking → top 10
+   - Deduplicates task search_requests
+
+4. **`generate_recommendations(user_query, products)`**
+   - Calls local model for natural language
+   - Uses product context
+
+5. **`shopping_planner_hf(user_query)`**
    - Complete pipeline: parse → search → recommend
+   - Extensive DEBUG logging
    - Used by `/smart-search` endpoint
 
-**Model Details**:
-- Base: `mlx-community/Qwen2.5-Coder-3B-Instruct-4bit`
-- Technique: **QLoRA** (Quantized LoRA)
-  - Base model: 4-bit quantized (1.5 GB)
-  - Adapter: 16-bit LoRA (25 MB)
-  - Rank: 16, Alpha: 32
-- Training: 1,000 e-commerce examples
-- Loss: 1.395 → 0.151 (89% improvement)
-- Total Size: 1.5 GB (base) + 25 MB (adapter)
+**Design Pattern**: Orchestrator + HTTP Client
 
-**Design Pattern**: Facade + Strategy
+---
 
-### 3. Search Pipeline Layer (`search_pipeline.py`)
+### 5. Search Pipeline Layer (`search_pipeline.py`) - RENDER
 **Responsibility**: Hybrid search execution
 
 **Key Functions**:
@@ -176,6 +290,7 @@ Detailed architecture and design decisions for the Decathlon Smart Search System
 2. **`semantic_rank()`**
    - pgvector similarity ranking
    - Input: query text + candidates
+   - Uses remote embedding via HTTP
    - Returns: Top 10 products with scores
 
 3. **`hybrid_search()`**
@@ -194,21 +309,31 @@ Detailed architecture and design decisions for the Decathlon Smart Search System
 
 **Search Strategy**: Two-stage hybrid approach
 
-### 4. Embedding Layer (`embedding.py`)
-**Responsibility**: Text-to-vector conversion
+---
 
-**Model**: BAAI/bge-small-en-v1.5
-- Dimension: 384
-- Normalized embeddings
-- Singleton pattern (loaded once)
+### 6. Embedding Layer (`embedding.py`) - RENDER
+**Responsibility**: Remote embedding via HTTP  
+**NO local model loading**
 
 **Functions**:
-- `get_embedding(text)` - Single text
-- `get_embeddings_batch(texts)` - Batch processing
+- `get_embedding(text)` - Single text via HTTP
+- `get_embeddings_batch(texts)` - Batch via HTTP
 
-**Performance**: ~30-50ms per embedding
+**Implementation**:
+```python
+from local_model_client import get_client
 
-### 5. Database Layer (`db.py`)
+def get_embedding(text):
+    client = get_client()
+    embeddings = client.embed([text])
+    return embeddings[0]
+```
+
+**Performance**: ~100ms per request (HTTP + inference)
+
+---
+
+### 7. Database Layer (`db.py`) - RENDER
 **Responsibility**: PostgreSQL connection management
 
 **Features**:
@@ -228,7 +353,9 @@ Detailed architecture and design decisions for the Decathlon Smart Search System
 - `release_connection()` - Return to pool
 - `close_pool()` - Cleanup
 
-### 6. Configuration (`config.py`)
+---
+
+### 8. Configuration (`config.py`)
 **Responsibility**: Centralized configuration
 
 **Settings**:
@@ -236,6 +363,8 @@ Detailed architecture and design decisions for the Decathlon Smart Search System
 - Model paths
 - Search parameters
 - System prompts
+
+---
 
 ## Data Flow
 
@@ -246,14 +375,14 @@ Detailed architecture and design decisions for the Decathlon Smart Search System
    "Horse riding boots for kids below 3000"
    │
    ▼
-2. API Layer (/smart-search)
+2. API Layer (/smart-search) - RENDER
    - Validate request
    - Extract query
    │
    ▼
-3. MLX Planner - Parse Phase (~500ms)
-   - load_fine_tuned_model() [cached]
-   - parse_query_with_qwen(query)
+3. HTTP → Mac Server (/parse-query) (~1-2s)
+   - Qwen2.5-1.5B + LoRA inference
+   - ChatML format
    - Returns: {
        "intent": "search",
        "search_request": {
@@ -265,7 +394,12 @@ Detailed architecture and design decisions for the Decathlon Smart Search System
      }
    │
    ▼
-4. Search Pipeline - Keyword Phase (~20ms)
+4. Deduplication Check - RENDER
+   - Remove duplicate search_requests if present
+   - Log warnings
+   │
+   ▼
+5. Search Pipeline - Keyword Phase (~20ms)
    - keyword_search()
    - SQL: WHERE sport='Horse Riding' 
           AND price <= 3000
@@ -273,12 +407,13 @@ Detailed architecture and design decisions for the Decathlon Smart Search System
    - Returns: 50-100 candidates
    │
    ▼
-5. Embedding Generation (~50ms)
-   - get_embedding("Riding Boots boots kids")
+6. HTTP → Mac Server (/embed) (~100ms)
+   - sentence-transformers/all-MiniLM-L6-v2
+   - Input: "Riding Boots boots kids"
    - Returns: 384-dim vector
    │
    ▼
-6. Database - Semantic Phase (~80ms)
+7. Database - Semantic Phase (~80ms)
    SELECT p.*, 
           1 - (pe.embedding <=> $1) AS similarity
    FROM products p
@@ -288,158 +423,115 @@ Detailed architecture and design decisions for the Decathlon Smart Search System
    LIMIT 10
    │
    ▼
-7. Search Results
+8. Search Results
    [10 products with similarity scores]
    │
    ▼
-8. MLX Planner - Recommendation Phase (~500ms)
+9. HTTP → Mac Server (/generate) (~1-2s)
    - format_products_for_llm(products)
-   - generate_recommendations()
+   - Qwen2.5-1.5B + LoRA inference
    - Returns: Natural language recommendations
    │
    ▼
-9. API Response
-   {
-     "status": "success",
-     "user_query": "...",
-     "parsed_query": {...},
-     "products": [...],
-     "recommendations": "I found some great options...",
-     "metadata": {
-       "model": "Qwen 3:4B Fine-tuned (MLX)",
-       "products_found": 10
-     }
-   }
+10. API Response
+    {
+      "status": "success",
+      "user_query": "...",
+      "parsed_query": {...},
+      "products": [...],
+      "recommendations": "I found some great options...",
+      "metadata": {
+        "model": "Qwen2.5-1.5B-Instruct (Local Server)",
+        "products_found": 10
+      }
+    }
 ```
 
-### Parse Query Request Flow (JSON Only)
-
-```
-1. User Query
-   "Horse riding boots for kids below 3000"
-   │
-   ▼
-2. API Layer (/parse-query)
-   - Validate request
-   │
-   ▼
-3. MLX Planner
-   - parse_query_with_qwen(query)
-   - Returns structured JSON
-   │
-   ▼
-4. API Response
-   {
-     "status": "success",
-     "parsed_query": {...},
-     "intent": "search",
-     "metadata": {"parse_time_ms": 485}
-   }
-   
-   NO database access!
-   NO search!
-   ~500ms total
-```
-
-### Hybrid Search Request Flow (Products Only)
-
-```
-1. Structured JSON (from /parse-query or manual)
-   {
-     "intent": "search",
-     "search_request": {...}
-   }
-   │
-   ▼
-2. API Layer (/hybrid-search)
-   - Validate parsed_query
-   │
-   ▼
-3. Search Pipeline
-   - keyword_search() → candidates
-   - semantic_rank() → top 10
-   │
-   ▼
-4. API Response
-   {
-     "status": "success",
-     "products": [...],
-     "count": 10
-   }
-   
-   NO LLM inference!
-   ~100ms total
-```
+---
 
 ## Key Design Decisions
 
-### 1. Fine-tuned Model vs. Generic LLM
-**Previous**: Generic Qwen 3:4B via Ollama  
-**Current**: Fine-tuned Qwen 3:4B + LoRA via MLX
-
+### 1. Split Architecture (Render + Mac)
 **Rationale**:
-- **Deterministic output**: Structured JSON, not conversational
-- **Domain-specific**: Trained on 1,000 e-commerce queries
-- **Faster**: No external Ollama server
-- **Portable**: 25 MB adapter vs. several GB full model
-- **Apple Silicon optimized**: MLX framework
+- **Render Free Tier**: 512 MB RAM insufficient for ML models
+- **Mac Server**: Handles all ML inference (~1,900 MB)
+- **Render Backend**: Thin API gateway (~200 MB)
+- **Communication**: HTTP via ngrok tunnel
+- **Cost**: Free tier deployment viable
 
-### 2. Three Endpoint Design
+### 2. All ML Models on Mac
+**Components on Mac**:
+- Qwen2.5-1.5B-Instruct + LoRA (~1,500 MB)
+- SentenceTransformer (~300 MB)
+
+**Components on Render**:
+- PostgreSQL client (~50 MB)
+- Flask + dependencies (~100 MB)
+- HTTP client (minimal)
+
+**Benefits**:
+- Render fits in 512 MB free tier
+- Mac has sufficient RAM
+- Apple Silicon GPU acceleration (MPS)
+
+### 3. ChatML Format (No System Prompts)
+**Rationale**:
+- Training data uses ChatML format
+- `apply_chat_template()` adds unwanted system prompts
+- Manual format matches training exactly
+- Produces clean JSON output
+
+### 4. Deduplication at Multiple Stages
+**Rationale**:
+- Model can generate duplicate search_requests
+- Applied after parsing (clean model output)
+- Applied before search (prevent duplicate queries)
+- Defensive programming
+
+### 5. Three Endpoint Design
 **Rationale**:
 - **Flexibility**: Choose speed vs. features
 - **Testing**: Parse-query for model validation
 - **Integration**: Hybrid-search for custom logic
 - **User-facing**: Smart-search for complete experience
 
-### 3. Model Pre-loading
-**Rationale**:
-- **No cold start**: Model loads on API startup
-- **Fast responses**: First request is as fast as subsequent ones
-- **Better UX**: Predictable latency
-
-### 4. Hybrid Search (Two-Stage)
+### 6. Hybrid Search (Two-Stage)
 **Rationale**:
 - **Stage 1 (Keyword)**: Fast SQL filtering (20ms)
-- **Stage 2 (Semantic)**: Rank only candidates (80ms)
-- **vs. Pure Semantic**: Would take 500ms for 8,829 products
-- **5x faster** with same quality
+- **Stage 2 (Semantic)**: Rank only candidates (80ms + HTTP)
+- **vs. Pure Semantic**: Would require embedding 8,829 products
+- **Faster** with same quality
 
-### 5. Separate Parse + Search Endpoints
+### 7. ngrok for Local Server Exposure
 **Rationale**:
-- **Debugging**: See what model understood
-- **Custom logic**: Modify JSON before search
-- **A/B testing**: Compare different models
-- **Analytics**: Track query patterns
+- Easy local → internet tunnel
+- HTTPS support
+- Free tier available
+- Alternative to cloud GPU instances
 
-### 6. QLoRA (Quantized LoRA) vs. Full Fine-tune
-**Rationale**:
-- **QLoRA = LoRA + 4-bit Quantization**
-- **Base Model**: 4-bit quantized (1.5 GB) vs. 16-bit (6 GB)
-- **Adapter Size**: 25 MB vs. 3+ GB full fine-tuned model
-- **Memory During Training**: 4x less than regular LoRA
-- **Training Speed**: Faster with lower memory footprint
-- **Flexibility**: Swap base model easily
-- **Quality**: 89% loss reduction maintained
-- **Training**: Faster, less GPU memory
-- **Flexibility**: Swap base model easily
-- **Quality**: 89% loss reduction maintained
+---
 
 ## Performance Characteristics
 
-### Model Inference (MLX)
+### Model Inference (Mac - MPS)
 
 **Query Parsing**:
-- Time: ~500ms per query
-- Model: Qwen 3:4B + LoRA (4-bit)
-- Device: CPU (Apple Silicon)
-- Memory: ~4GB
+- Time: ~1-2s per query
+- Model: Qwen2.5-1.5B + LoRA (FP16)
+- Device: MPS (Apple Silicon)
+- Memory: ~1,500 MB
 
 **Recommendation Generation**:
-- Time: ~500ms per request
+- Time: ~1-2s per request
 - Context: Products + user query
 - Output: Natural language text
 
-### Search Pipeline
+**Embeddings**:
+- Time: ~50-100ms per batch
+- Model: all-MiniLM-L6-v2
+- Dimension: 384
+
+### Search Pipeline (Render)
 
 **Keyword Search (SQL)**:
 - Time: ~20ms
@@ -447,17 +539,17 @@ Detailed architecture and design decisions for the Decathlon Smart Search System
 - Candidates: 50-100 products
 
 **Semantic Ranking (pgvector)**:
-- Time: ~80ms
+- Time: ~80ms (SQL only)
 - Operation: Vector similarity (HNSW)
 - Results: Top 10 products
 - Index: Approximate nearest neighbor
 
-### Embedding Generation
+### HTTP Overhead
 
-**Single Query**:
-- Model: BAAI/bge-small-en-v1.5
-- Time: ~30-50ms (CPU)
-- Dimension: 384
+**Render → Mac (via ngrok)**:
+- Latency: ~50-200ms per request
+- Depends on network conditions
+- ngrok free tier: 40 requests/minute limit
 
 ### End-to-End Latency
 
@@ -466,9 +558,11 @@ Detailed architecture and design decisions for the Decathlon Smart Search System
 Component           Time
 ───────────────────────
 API overhead        5ms
-MLX inference       500ms
+HTTP to Mac         100ms
+Model inference     1-2s
+HTTP response       50ms
 ───────────────────────
-Total               ~500ms
+Total               ~1.2-2.2s
 ```
 
 **Hybrid Search** (`/hybrid-search`):
@@ -477,10 +571,10 @@ Component           Time
 ───────────────────────
 API overhead        5ms
 Keyword filter      20ms
-Embedding gen       50ms
+HTTP to Mac (embed) 150ms
 Semantic rank       80ms
 ───────────────────────
-Total               ~150ms
+Total               ~250ms
 ```
 
 **Smart Search** (`/smart-search`):
@@ -488,169 +582,128 @@ Total               ~150ms
 Component           Time
 ───────────────────────
 API overhead        5ms
-Parse (MLX)         500ms
+HTTP (parse)        1.2s
 Keyword filter      20ms
-Embedding gen       50ms
+HTTP (embed)        150ms
 Semantic rank       80ms
-Recommend (MLX)     500ms
+HTTP (recommend)    1.2s
+Deduplication       1ms
 ───────────────────────
-Total               ~1.2s
+Total               ~2.7s
 ```
+
+---
 
 ## Scalability Considerations
 
-### Horizontal Scaling
+### Current Limitations
 
-**Stateless Design**:
-- Each request is independent
-- Model loaded in each API instance
-- Can add multiple API servers
+**ngrok Free Tier**:
+- 40 requests/minute limit
+- Tunnel expires after 8 hours
+- Single connection
 
-**Components to Scale**:
-1. API servers (4GB RAM each for model)
-2. PostgreSQL (read replicas)
-3. Load balancer (Nginx/HAProxy)
+**Mac Server**:
+- Single instance
+- No load balancing
+- Requires Mac to be on
 
-**Deployment**:
-```
-         ┌─────────────┐
-         │Load Balancer│
-         └──────┬──────┘
-                │
-        ┌───────┼───────┐
-        ▼       ▼       ▼
-    ┌─────┐ ┌─────┐ ┌─────┐
-    │API 1│ │API 2│ │API 3│
-    │+MLX │ │+MLX │ │+MLX │
-    └──┬──┘ └──┬──┘ └──┬──┘
-       └───────┼───────┘
-               ▼
-       ┌──────────────┐
-       │ PostgreSQL   │
-       │ (with replicas)
-       └──────────────┘
-```
+**Render Free Tier**:
+- 512 MB RAM
+- Spins down after inactivity
 
-### Vertical Scaling
+### Production Recommendations
 
-**CPU-bound**:
-- MLX inference (Apple Silicon recommended)
-- Embedding generation
-- More cores = better throughput
+**For Mac Server**:
+1. Replace ngrok with cloud server
+2. Deploy to AWS/GCP with GPU
+3. Add load balancer for multiple instances
+4. Use Redis for caching
 
-**Memory-bound**:
-- MLX model: ~4GB
-- Embedding model: ~1GB
-- Connection pool: <100MB
+**For Render Backend**:
+1. Upgrade to paid tier (more RAM)
+2. Add Redis for caching
+3. Connection pooling already in place
 
-**Requirements**:
-- Minimum: 8GB RAM, 4 cores
-- Recommended: 16GB RAM, 8 cores
-- Optimal: Apple M1/M2/M3
+**Alternative**: Deploy both on same cloud instance (AWS, GCP, Azure)
 
-### Caching Strategy
+---
 
-**Current**:
-- Model: Singleton (loaded once per API instance)
-- Database: Connection pooling
-- Embeddings: In database
+## Deployment
 
-**Future** (with Redis):
-- Query embeddings (common queries)
-- Parsed queries (frequent patterns)
-- Search results (popular queries)
-- TTL: 1 hour for query cache
+### Local Development
 
-## Security Considerations
-
-### SQL Injection Protection
-- Parameterized queries throughout
-- No string concatenation
-- psycopg2 built-in protection
-
-### Input Validation
-- Query length limits (max 500 chars)
-- JSON schema validation
-- Type checking in API layer
-
-### Model Security
-- Local model (no external API)
-- No user data sent externally
-- Model weights read-only
-
-### Authentication (Production)
-- Add JWT tokens
-- API keys for services
-- Rate limiting per user
-
-### CORS
-- Configured for development
-- Production: Restrict origins
-
-### Environment Secrets
-- Database credentials in .env
-- Never commit .env
-- Use AWS Secrets Manager in production
-
-## Monitoring and Observability
-
-### Key Metrics
-
-**API Layer**:
-- Request rate (req/s)
-- Response latency (p50, p95, p99)
-- Error rate (5xx, 4xx)
-- Endpoint usage distribution
-
-**Model Layer**:
-- Inference latency (parse, recommend)
-- Model load time (startup)
-- Memory usage
-- Parse success rate
-
-**Search Layer**:
-- Keyword candidates count
-- Semantic ranking latency
-- Products found distribution
-- Search cache hit rate
-
-**Database**:
-- Query latency
-- Connection pool usage
-- Index hit rate
-- Slow query log
-
-### Logging
-
-```python
-INFO  - User query received
-INFO  - Parsed query: {"intent": "search", ...}
-INFO  - Keyword search: 87 candidates
-INFO  - Semantic ranking: top 10 selected
-INFO  - Recommendations generated
-INFO  - Response sent (total: 1234ms)
+**Terminal 1 - Mac Server**:
+```bash
+python3 local_model_server.py
 ```
 
-### Recommended Tools
+**Terminal 2 - ngrok**:
+```bash
+ngrok http 8001
+```
 
-- **APM**: New Relic, DataDog
-- **Logs**: ELK Stack, Loki
-- **Metrics**: Prometheus + Grafana
-- **Tracing**: Jaeger (distributed tracing)
+**Terminal 3 - Render Backend (local)**:
+```bash
+cd backend
+export LOCAL_MODEL_URL=http://localhost:8001
+python3 api_swagger.py
+```
+
+### Production Deployment
+
+**Mac Server**:
+```bash
+python3 local_model_server.py
+ngrok http 8001
+```
+
+**Render**:
+1. Set environment variable: `LOCAL_MODEL_URL=https://xxxx.ngrok-free.app`
+2. Push to git: `git push origin main`
+3. Render auto-deploys
+
+---
+
+## Memory Breakdown
+
+### Render Backend (512 MB Limit)
+```
+PostgreSQL client:    ~50 MB
+Flask + SQLAlchemy:   ~80 MB
+Numpy (minimal):      ~20 MB
+Python runtime:       ~30 MB
+Request handlers:     ~20 MB
+─────────────────────────────
+Total:                ~200 MB ✓ Fits!
+```
+
+### Mac Local Server
+```
+Python runtime:       ~30 MB
+Qwen2.5-1.5B (FP16):  ~1,500 MB
+LoRA adapter:         ~35 MB
+SentenceTransformer:  ~300 MB
+FastAPI:              ~20 MB
+─────────────────────────────
+Total:                ~1,885 MB
+```
+
+---
 
 ## Error Handling Strategy
 
 ### Graceful Degradation
 
-1. **Model Load Failure**: 
-   - API returns 503
-   - Log error with details
-   - Instruction: Train model first
+1. **Local Server Unavailable**: 
+   - Return 503 Service Unavailable
+   - Log connection error
+   - Message: "Model server not reachable"
 
 2. **Database Unavailable**:
-   - Return cached results
-   - Fallback to empty response
+   - Return cached results if available
    - Retry with backoff
+   - Clear error message
 
 3. **Parse Failure**:
    - Return error to user
@@ -659,199 +712,137 @@ INFO  - Response sent (total: 1234ms)
 
 ### Retry Logic
 
+- HTTP to Mac: 2 retries, timeout 120s
 - Database: 3 retries, exponential backoff
-- Model inference: 2 retries, timeout
-- Embedding: Fast failure (no retry)
+- Fast failure for embeddings
 
-### User-Facing Errors
+---
 
-```python
-{
-  "status": "error",
-  "error": "Model not found",
-  "message": "Please train the model first: cd training && python3 train_mlx.py"
-}
-```
-
-## Testing Strategy
-
-### Unit Tests
-- Search functions (keyword, semantic, hybrid)
-- Model loading and inference
-- Database queries
-- Decimal conversion
-- JSON parsing
-
-### Integration Tests
-- API endpoints (parse, search, smart)
-- Model + search pipeline
-- Database + embeddings
-- Error scenarios
-
-### Performance Tests
-- Latency benchmarks
-- Concurrent requests
-- Memory usage
-- Model load time
+## Testing
 
 ### Test Scripts
-- `test_smart_search_fixed.py` - All endpoints
-- `test_parse_query.py` - Parse endpoint
-- `inference_mlx.py` - Model standalone
+
+- `test_local_model.py` - Test Mac server endpoints
+- `test_embeddings.py` - Test embedding endpoint
+- `test_chatml_inference.py` - Test ChatML format
+- `test_both_intents.py` - Test search and task intents
+- `test_duplicates.py` - Test deduplication
+
+### Running Tests
+
+```bash
+# Terminal 1: Start Mac server
+python3 local_model_server.py
+
+# Terminal 2: Run tests
+python3 test_local_model.py
+python3 test_embeddings.py
+python3 test_duplicates.py
+```
+
+---
 
 ## Model Training
 
 ### Training Data
-- Location: `training/data/train_mlx.jsonl`
-- Format: Chat-ML (MLX format)
-- Examples: 1,000 queries
+- Location: `training/data/train.jsonl`
+- Format: ChatML
+- Examples: 250+ queries
 - Quality: Hand-crafted + validated
 
 ### Training Process
 ```bash
 cd training
-python3 train_mlx.py
+python3 train_hf.py
 ```
 
 **Configuration**:
+- Base: Qwen/Qwen2.5-1.5B-Instruct
 - LoRA rank: 16
 - LoRA alpha: 32
 - Batch size: 4
 - Learning rate: 1e-4
 - Epochs: 3
-- Time: ~30-45 minutes
-
-**Results**:
-- Initial loss: 1.395
-- Final loss: 0.151
-- Improvement: 89%
+- Device: MPS (Apple Silicon)
 
 ### Model Location
 ```
-training/outputs/shopping_agent_lora/
-├── adapters.safetensors    # Main adapter (25MB)
-├── adapter_config.json      # Configuration
-└── 0000XXX_*.safetensors   # Checkpoints
+training/outputs/qwen25_1_5b_lora_hf/
+├── adapter_model.safetensors  # Adapter (35MB)
+├── adapter_config.json         # Configuration
+└── tokenizer.json              # Tokenizer
 ```
-
-## Comparison: Old vs. New Architecture
-
-### Old Architecture (Ollama)
-```
-User → API → Planner → Ollama (external) → Qwen 3:4B (generic)
-                ↓
-           Python Tools
-                ↓
-           PostgreSQL
-```
-
-**Characteristics**:
-- Generic Qwen 3:4B via Ollama
-- Conversational responses
-- ~6-7 seconds per request
-- External Ollama server required
-- Iterative planning (3 iterations)
-- Large model download (several GB)
-
-### New Architecture (MLX + Fine-tuned)
-```
-User → API → MLX Planner → Fine-tuned Qwen (local)
-                ↓
-           Search Pipeline
-                ↓
-           PostgreSQL
-```
-
-**Characteristics**:
-- Fine-tuned Qwen 3:4B via MLX
-- Structured JSON output
-- ~1-2 seconds per request
-- No external server needed
-- Single-pass execution
-- Small adapter (25 MB)
-
-### Benefits of New Architecture
-
-1. **Faster**: 1-2s vs 6-7s
-2. **Deterministic**: JSON vs. conversational
-3. **Portable**: 25MB vs several GB
-4. **Flexible**: 3 endpoints vs. 1
-5. **Testable**: Parse separately
-6. **Optimized**: Apple Silicon MLX
-7. **Custom**: Domain-specific fine-tuning
-
-## Dependencies
-
-### Python Libraries
-```
-# Core
-psycopg2-binary    # PostgreSQL
-sentence-transformers  # Embeddings
-mlx-lm             # Apple MLX for model
-flask              # Web framework
-flask-restx        # Swagger
-flask-cors         # CORS
-python-dotenv      # Config
-
-# Training
-datasets           # Data handling
-transformers       # Model training
-```
-
-### External Services
-- **PostgreSQL 14+**: Database
-- **pgvector**: Vector extension
-- **Apple Silicon**: For MLX (M1/M2/M3)
-
-### System Requirements
-- Python 3.11+
-- macOS (for MLX)
-- 8GB+ RAM (16GB recommended)
-- 50GB disk space
-
-## Maintenance
-
-### Regular Tasks
-- Database vacuum (weekly)
-- Model retraining (monthly with new data)
-- Log rotation (daily)
-- Backup verification (weekly)
-- Dependency updates (monthly)
-
-### Health Checks
-- API: GET `/api/v1/system/health`
-- Database: Connection test
-- Model: Load test
-- Disk space: Monitor
-
-### Model Updates
-
-**When to retrain**:
-- New product categories
-- Query pattern changes
-- User feedback indicates errors
-- Monthly retraining schedule
-
-**How to retrain**:
-```bash
-cd training
-# Update data/train_mlx.jsonl
-python3 train_mlx.py
-# Test: python3 inference_mlx.py
-# Deploy: Restart API
-```
-
-## References
-
-- [MLX Documentation](https://ml-explore.github.io/mlx/)
-- [pgvector Documentation](https://github.com/pgvector/pgvector)
-- [HNSW Algorithm](https://arxiv.org/abs/1603.09320)
-- [BAAI/bge Models](https://huggingface.co/BAAI/bge-small-en-v1.5)
-- [LoRA Paper](https://arxiv.org/abs/2106.09685)
-- [Qwen Models](https://huggingface.co/Qwen)
 
 ---
 
-**Architecture Status**: Production-ready with fine-tuned model  
-**Last Updated**: June 16, 2026  
-**Version**: 2.0 (MLX + Fine-tuned)
+## Dependencies
+
+### Render Backend (`requirements_render.txt`)
+```
+# NO torch
+# NO transformers
+# NO sentence-transformers
+
+flask
+requests
+psycopg2-binary
+numpy<2.0  # Minimal, for arrays only
+pgvector
+```
+
+### Mac Server (`requirements_local_server.txt`)
+```
+torch>=2.0.0
+transformers>=4.36.0
+peft>=0.7.0
+sentence-transformers>=2.2.0
+fastapi>=0.104.0
+uvicorn>=0.24.0
+numpy<2.0.0  # Important for compatibility
+```
+
+---
+
+## Comparison: Render Only vs. Split Architecture
+
+### Render Only (Failed)
+```
+Render (512 MB)
+├─ SentenceTransformer (300 MB)
+├─ Qwen Model (1,500 MB) ← DOESN'T FIT!
+└─ PostgreSQL client (50 MB)
+
+Result: Out of Memory
+```
+
+### Split Architecture (Success)
+```
+Render (512 MB)
+├─ HTTP Client (minimal)
+├─ PostgreSQL client (50 MB)
+└─ Flask + deps (100 MB)
+✓ Total: ~200 MB
+
+Mac
+├─ Qwen2.5-1.5B + LoRA (1,500 MB)
+└─ SentenceTransformer (300 MB)
+✓ Total: ~1,900 MB
+```
+
+---
+
+## References
+
+- [Qwen2.5 Models](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct)
+- [PEFT/LoRA](https://github.com/huggingface/peft)
+- [sentence-transformers](https://www.sbert.net/)
+- [pgvector Documentation](https://github.com/pgvector/pgvector)
+- [FastAPI](https://fastapi.tiangolo.com/)
+- [ngrok](https://ngrok.com/)
+
+---
+
+**Architecture Status**: Production (Split Architecture)  
+**Last Updated**: June 19, 2026  
+**Version**: 3.0 (Render + Mac Local Server)  
+**Deployment**: Render Free Tier (512 MB) + Mac with Apple Silicon

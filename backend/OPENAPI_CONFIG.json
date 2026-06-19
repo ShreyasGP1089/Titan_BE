@@ -1,0 +1,72 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Decathlon Smart Search API",
+    "version": "1.0.0",
+    "description": "AI-powered shopping search API using fine-tuned Qwen 3:4B. Understands natural language queries and returns personalized product recommendations with semantic search."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:5000/api/v1",
+      "description": "Local development server"
+    }
+  ],
+  "paths": {
+    "/shopping/smart-search": {
+      "post": {
+        "summary": "Smart search with AI recommendations",
+        "description": "Complete AI-powered search: parses natural language query, executes hybrid search, and returns products with personalized recommendations.",
+        "operationId": "smart_search",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                  "query": {
+                    "type": "string",
+                    "description": "Natural language search query (e.g. 'Horse riding boots for kids below 3000')"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Search results with products and AI recommendations"
+          },
+          "401": {
+            "description": "Unauthorized - API key missing"
+          },
+          "403": {
+            "description": "Forbidden - Invalid API key"
+          },
+          "400": {
+            "description": "Missing or invalid query parameter"
+          },
+          "503": {
+            "description": "Fine-tuned model not available"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "apiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "API-KEY",
+        "description": "API key for authentication (use hyphen, not underscore)"
+      }
+    }
+  }
+}
