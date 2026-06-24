@@ -19,6 +19,7 @@ from decimal import Decimal
 from psycopg2.extras import RealDictCursor
 from database import connect_db, release_connection
 from services.embedding_service import EmbeddingService
+from services.validation_service import ProductValidationService
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +55,88 @@ class HybridSearchService:
     DESCRIPTION_MATCH_SCORE = 0.3  # Lowest priority
     EXACT_MATCH_BOOST = 0.2     # Bonus for exact word match
     
+    KNOWN_PRODUCT_TYPES = {
+        'glove', 'gloves', 'backpack', 'backpacks', 'bottle', 'bottles', 'tent', 'tents', 
+        'football', 'footballs', 'helmet', 'helmets', 'racket', 'rackets', 'shoe', 'shoes', 
+        'sock', 'socks', 'trouser', 'trousers', 'short', 'shorts', 'jacket', 'jackets', 
+        'ball', 'balls', 'mat', 'mats', 'bag', 'bags', 'pole', 'poles', 'watch', 'watches', 
+        'cap', 'caps', 'goggle', 'goggles', 'swimsuit', 'swimsuits', 'jersey', 'jerseys', 
+        'shirt', 'shirts', 'guard', 'guards', 'block', 'blocks', 'strap', 'straps', 
+        'chair', 'chairs', 'stove', 'stoves', 'lamp', 'lamps'
+    }
+    
+    EXCLUDED_MODIFIERS = {
+        'cover', 'covers', 'bag', 'bags', 'holder', 'holders', 'net', 'nets', 
+        'pump', 'pumps', 'whistle', 'whistles', 'card', 'cards', 'armband', 'armbands', 
+        'bib', 'bibs', 'ladder', 'ladders', 'warmer', 'warmers', 'tights', 'goal', 'goals', 
+        'guard', 'guards', 'pads', 'pad', 'strap', 'straps', 'cleaning', 'brush', 'brushes',
+        'jersey', 'jerseys', 'shirt', 'shirts', 'short', 'shorts', 'jacket', 'jackets',
+        'socks', 'sock', 'trouser', 'trousers', 'cap', 'caps', 'goggle', 'goggles',
+        'swimsuit', 'swimsuits', 'helmet', 'helmets', 'racket', 'rackets', 'cone', 'cones',
+        'marker', 'markers', 'saucer', 'saucers', 'needle', 'needles', 'referee'
+    }
+    
+    BROAD_QUERY_MODIFIERS = {
+        'gear', 'equipment', 'products', 'accessories', 'kit', 'kits'
+    }
+    
     def __init__(self):
         self.embedding_service = EmbeddingService()
+        self.validation_service = ProductValidationService()
+        
+    def _get_product_type_variations(self, product_type: str) -> List[str]:
+        w = product_type.lower()
+        vars = [w]
+        if w.endswith('s') and len(w) > 3:
+            vars.append(w[:-1])
+            if w.endswith('es') and len(w) > 4:
+                vars.append(w[:-2])
+        else:
+            vars.append(w + 's')
+            vars.append(w + 'es')
+        return list(set(vars))
+        
+    def _matches_product_type(self, name: str, description: str, requested_types: List[str]) -> bool:
+        if not requested_types:
+            return True
+        name_lower = name.lower() if name else ""
+        desc_lower = description.lower() if description else ""
+        
+        # 1. First check presence of the product type in name or description
+        has_presence = False
+        for p_type in requested_types:
+            variations = self._get_product_type_variations(p_type)
+            if any(var in name_lower or var in desc_lower for var in variations):
+                has_presence = True
+                break
+                
+        if not has_presence:
+            return False
+            
+        # 2. Apply head-noun post-modifier rejection on the product name
+        name_words = [w.strip('.,()[]-+*#') for w in name_lower.split()]
+        name_words = [w for w in name_words if w]
+        
+        active_exclusions = self.EXCLUDED_MODIFIERS.copy()
+        for p_type in requested_types:
+            variations = self._get_product_type_variations(p_type)
+            for var in variations:
+                active_exclusions.discard(var)
+                
+        last_match_idx = -1
+        for i, word in enumerate(name_words):
+            for p_type in requested_types:
+                variations = self._get_product_type_variations(p_type)
+                if any(var == word or (len(word) > len(var) and word.startswith(var)) for var in variations):
+                    last_match_idx = i
+                    
+        if last_match_idx != -1:
+            for word in name_words[last_match_idx + 1:]:
+                if word in active_exclusions:
+                    logger.info(f"Excluding '{name}' because it is modified by '{word}' (not in requested types)")
+                    return False
+                    
+        return True
     
     def _safe_lower(self, value) -> str:
         """
@@ -152,6 +233,12 @@ class HybridSearchService:
             
             if matched:
                 unique_matches += 1
+                
+            # Apply product type name boost: +0.3 if the product type keyword matches in the name
+            if matched and keyword.lower() in self.KNOWN_PRODUCT_TYPES:
+                if any(var in product_name for var in vars):
+                    keyword_score += 0.3
+                    
             individual_scores.append(keyword_score)
         
         base_score = max(individual_scores) if individual_scores else 0.0
@@ -176,7 +263,7 @@ class HybridSearchService:
     
     def keyword_filter(
         self,
-        sport: str,
+        sport: Optional[str] = None,
         category_level_1: Optional[str] = None,
         category_level_2: Optional[str] = None,
         keywords: Optional[List[str]] = None,
@@ -216,9 +303,10 @@ class HybridSearchService:
             """
             params = []
             
-            # Filter by sport (required)
-            query += " AND LOWER(sport) = LOWER(%s)"
-            params.append(sport)
+            # Filter by sport (optional)
+            if sport:
+                query += " AND LOWER(sport) = LOWER(%s)"
+                params.append(sport)
             
             # Filter by category_level_1
             if category_level_1:
@@ -327,22 +415,14 @@ class HybridSearchService:
         query_text: str,
         keywords: List[str],
         candidate_products: List[Dict],
-        top_k: int = 10
+        top_k: int = 10,
+        fallback_step: int = 0
     ) -> List[Dict]:
         """
-        TRUE HYBRID RANKING: Combine keyword and semantic scores.
+        TRUE HYBRID RANKING: Combine keyword and semantic scores with precision validations.
         
         Formula:
             final_score = (semantic_score * 0.6) + (keyword_score * 0.4)
-        
-        Args:
-            query_text: Text for semantic embedding
-            keywords: Keywords for keyword matching
-            candidate_products: Products to rank
-            top_k: Number of top results to return
-        
-        Returns:
-            Ranked products with score breakdown
         """
         if not candidate_products:
             return []
@@ -354,10 +434,34 @@ class HybridSearchService:
         logger.info(f"Candidates: {len(candidate_products)}")
         logger.info("=" * 80)
         
+        # Determine requested product types from keywords
+        requested_product_types = []
+        if keywords:
+            for kw in keywords:
+                kw_lower = kw.lower()
+                if kw_lower in self.KNOWN_PRODUCT_TYPES:
+                    requested_product_types.append(kw_lower)
+        has_product_type = len(requested_product_types) > 0
+        
+        # Calculate keyword scores first to allow early exit
+        candidate_keyword_scores = {}
+        has_any_keyword_match = False
+        
+        for product in candidate_products:
+            pid = product['product_id']
+            kw_score = self.calculate_keyword_score(product, keywords)
+            candidate_keyword_scores[pid] = kw_score
+            if kw_score > 0.0:
+                has_any_keyword_match = True
+                
+        if keywords and not has_any_keyword_match:
+            logger.info("Zero keyword match among all candidates. Returning empty results immediately.")
+            return []
+            
         # Get semantic scores
         semantic_scores = self.semantic_search(query_text, candidate_products)
         
-        # Calculate keyword scores and combine
+        # Combine scores and apply validations
         ranked_products = []
         
         for product in candidate_products:
@@ -367,11 +471,27 @@ class HybridSearchService:
             # Get semantic score
             semantic_score = semantic_scores.get(product_id, 0.0)
             
-            # Calculate keyword score
-            keyword_score = self.calculate_keyword_score(product, keywords)
+            # Get pre-calculated keyword score
+            keyword_score = candidate_keyword_scores.get(product_id, 0.0)
             
             # Calculate final hybrid score
             final_score = (semantic_score * self.SEMANTIC_WEIGHT) + (keyword_score * self.KEYWORD_WEIGHT)
+            
+            # Threshold checks:
+            # 1. final_score < 0.15 -> Reject
+            if final_score < 0.15:
+                logger.info(f"Rejecting '{product_name}' [id={product_id}] due to final_score {final_score:.4f} < 0.15")
+                continue
+                
+            # 2. keyword_score == 0.0 when keywords were provided -> Reject
+            if keywords and keyword_score == 0.0:
+                logger.info(f"Rejecting '{product_name}' [id={product_id}] due to keyword_score == 0.0 when keywords were provided")
+                continue
+                
+            # 3. Product type validation
+            if has_product_type and not self._matches_product_type(product_name, product.get('description'), requested_product_types):
+                logger.info(f"Rejecting '{product_name}' [id={product_id}] because it does not match requested product type(s): {requested_product_types}")
+                continue
             
             # Add scores to product
             product_with_scores = product.copy()
@@ -384,16 +504,44 @@ class HybridSearchService:
         # Sort by final score (descending)
         ranked_products.sort(key=lambda x: x['final_score'], reverse=True)
         
-        # Log top results
+        # Log top results with detailed diagnostics (Change 6)
         logger.info("TOP RANKED PRODUCTS:")
         for i, p in enumerate(ranked_products[:top_k], 1):
-            logger.info(f"{i}. {p['name']}")
-            logger.info(f"   Semantic: {p['semantic_score']:.3f}, Keyword: {p['keyword_score']:.3f}, Final: {p['final_score']:.3f}")
+            pname = p['name']
+            pid = p['product_id']
+            pdesc = self._safe_lower(p.get('description'))
+            
+            # Reconstruct diagnostic info
+            matched_keywords = []
+            for kw in (keywords or []):
+                kw_lower = kw.lower()
+                vars = self._get_product_type_variations(kw_lower)
+                if any(var in pname.lower() for var in vars):
+                    matched_keywords.append(f"{kw}(name)")
+                elif any(var in pdesc for var in vars):
+                    matched_keywords.append(f"{kw}(desc)")
+                    
+            product_type_match = "NO"
+            if has_product_type:
+                matched_types = []
+                for p_type in requested_product_types:
+                    vars = self._get_product_type_variations(p_type)
+                    if any(var in pname.lower() for var in vars):
+                        matched_types.append(f"{p_type} in name")
+                    elif any(var in pdesc for var in vars):
+                        matched_types.append(f"{p_type} in desc")
+                if matched_types:
+                    product_type_match = f"YES ({', '.join(matched_types)})"
+                    
+            logger.info(f"RESULT {i}: \"{pname}\" [product_id={pid}]")
+            logger.info(f"  semantic={p['semantic_score']:.2f}  keyword={p['keyword_score']:.2f}  final={p['final_score']:.2f}")
+            logger.info(f"  matched_keywords: {', '.join(matched_keywords)}")
+            logger.info(f"  product_type_match: {product_type_match}")
+            logger.info(f"  fallback_step: {fallback_step}")
         logger.info("=" * 80)
         
-        # Return top_k
         return ranked_products[:top_k]
-    
+
     def search(
         self,
         sport: str,
@@ -404,17 +552,7 @@ class HybridSearchService:
         top_k: int = 10
     ) -> List[Dict]:
         """
-        TRUE HYBRID SEARCH: keyword scoring + semantic scoring.
-        
-        Flow:
-            1. Keyword filter → candidates (up to 100)
-            2. Calculate keyword scores for each candidate
-            3. Calculate semantic scores for each candidate
-            4. Combine: final_score = 0.6*semantic + 0.4*keyword
-            5. Return top_k by final score
-        
-        This prevents accessories (towels, apparel) from ranking above
-        actual equipment (clubs, balls) when searching for equipment.
+        TRUE HYBRID SEARCH: keyword scoring + semantic scoring + SLM validation.
         """
         logger.info("=" * 80)
         logger.info("HYBRID SEARCH REQUEST")
@@ -424,6 +562,24 @@ class HybridSearchService:
         logger.info(f"Keywords: {keywords}")
         logger.info(f"Price Limit: {price_limit}")
         logger.info("=" * 80)
+        
+        # Determine requested product types from keywords
+        product_type = None
+        is_broad_query = False
+        if keywords:
+            for kw in keywords:
+                if kw.lower() in self.BROAD_QUERY_MODIFIERS:
+                    is_broad_query = True
+                    break
+            
+            if not is_broad_query:
+                for kw in keywords:
+                    kw_lower = kw.lower()
+                    if kw_lower in self.KNOWN_PRODUCT_TYPES:
+                        product_type = kw_lower
+                        break
+        
+        has_product_type = product_type is not None
         
         # Graduated fallback cascade for candidate retrieval
         candidates = []
@@ -473,17 +629,32 @@ class HybridSearchService:
             if candidates:
                 logger.info(f"✓ Step 3 (OR keywords, no category): {len(candidates)} candidates")
         
-        # Step 4: Final fallback — sport + price only
+        # Step 4 & 5: Sport-only fallback OR Relaxed sport keyword fallback
         if not candidates:
-            logger.warning("No keyword candidates, falling back to sport-only")
-            candidates = self.keyword_filter(
-                sport=sport,
-                price_limit=price_limit,
-                limit=100
-            )
-            fallback_step = 4
-            if candidates:
-                logger.info(f"✓ Step 4 (sport-only fallback): {len(candidates)} candidates")
+            if has_product_type:
+                logger.warning(f"No candidates found in sport {sport} with keywords. Relaxing sport filter to search for product type across all sports.")
+                candidates = self.keyword_filter(
+                    sport=None,
+                    category_level_1=None,
+                    category_level_2=None,
+                    keywords=keywords,
+                    price_limit=price_limit,
+                    limit=100,
+                    keyword_mode='OR'
+                )
+                fallback_step = 5
+                if candidates:
+                    logger.info(f"✓ Step 5 (OR keywords, relaxed sport filter): {len(candidates)} candidates")
+            else:
+                logger.warning("No keyword candidates and no product type detected, falling back to sport-only")
+                candidates = self.keyword_filter(
+                    sport=sport,
+                    price_limit=price_limit,
+                    limit=100
+                )
+                fallback_step = 4
+                if candidates:
+                    logger.info(f"✓ Step 4 (sport-only fallback): {len(candidates)} candidates")
         
         if not candidates:
             logger.warning(f"No products found for sport={sport}")
@@ -492,24 +663,105 @@ class HybridSearchService:
         logger.info(f"✓ Found {len(candidates)} candidates (fallback step {fallback_step})")
         
         # Build semantic query text — always include sport for full context
-        query_parts = [sport]
+        query_parts = []
+        if sport:
+            query_parts.append(sport)
         if category_level_1:
             query_parts.append(category_level_1)
         if category_level_2:
             query_parts.append(category_level_2)
         if keywords:
             query_parts.extend(keywords)
-        
+            
         query_text = " ".join(query_parts)
+        
+        # Set candidate limit: 15 for SLM validation to prevent latency bottleneck
+        top_k_candidates = 15 if has_product_type else top_k
         
         # Hybrid ranking (keyword + semantic)
         ranked_products = self.hybrid_rank(
             query_text=query_text,
             keywords=keywords or [],
             candidate_products=candidates,
-            top_k=top_k
+            top_k=top_k_candidates,
+            fallback_step=fallback_step
         )
         
+        if not ranked_products:
+            if has_product_type:
+                logger.info(f"No products matching product type '{product_type}' found. Returning empty results rather than unrelated products.")
+            else:
+                logger.info("No products found matching the query criteria.")
+            return []
+            
+        # SLM Validation and Re-Ranking Layer
+        if has_product_type:
+            logger.info(f"SLM product validation enabled for product type: '{product_type}'")
+            validation_decisions = self.validation_service.validate_products(product_type, ranked_products)
+            
+            # Safe Fallback (No fail-open): if offline, fall back directly to original hybrid ranking
+            if validation_decisions is None:
+                logger.warning("SLM validation service failed or offline. Falling back to default hybrid ranking (no validation).")
+                return ranked_products[:top_k]
+                
+            # Create lookup map for decisions
+            decisions_map = {str(d.get("id")): d for d in validation_decisions}
+            
+            # Log detailed diagnostics for each candidate (Change 5 & 7)
+            logger.info("=" * 80)
+            logger.info("VALIDATION RESULT")
+            logger.info(f"Query: {' '.join(keywords) if keywords else ''}")
+            logger.info(f"Requested Product Type: {product_type}")
+            logger.info("=" * 80)
+            for p in ranked_products:
+                pid = str(p['product_id'])
+                d_info = decisions_map.get(pid, {"decision": "NOT_RELEVANT", "confidence": 0.0, "reason": "No decision returned from SLM"})
+                logger.info(f"Candidate: {p['name']}")
+                logger.info(f"Decision: {d_info.get('decision')}")
+                logger.info(f"Confidence: {d_info.get('confidence')}")
+                logger.info(f"Reason: {d_info.get('reason')}")
+                logger.info("-" * 40)
+            logger.info("=" * 80)
+            
+            relevant_products = []
+            related_products = []
+            
+            for p in ranked_products:
+                pid = str(p['product_id'])
+                d_info = decisions_map.get(pid)
+                if not d_info:
+                    continue
+                    
+                decision = d_info.get("decision", "NOT_RELEVANT").upper()
+                confidence = float(d_info.get("confidence", 0.0))
+                
+                if decision not in ("RELEVANT", "RELATED"):
+                    continue
+                    
+                # Update final score using formula: 0.7 * hybrid_score + 0.3 * validation_confidence
+                p_copy = p.copy()
+                hybrid_score = float(p.get("final_score", 0.0))
+                new_final_score = round((hybrid_score * 0.7) + (confidence * 0.3), 4)
+                p_copy["final_score"] = new_final_score
+                p_copy["validation_confidence"] = confidence
+                p_copy["validation_reason"] = d_info.get("reason", "")
+                p_copy["validation_decision"] = decision
+                
+                if decision == "RELEVANT":
+                    relevant_products.append(p_copy)
+                elif decision == "RELATED":
+                    related_products.append(p_copy)
+            
+            # Sort lists independently by final_score descending
+            relevant_products.sort(key=lambda x: x["final_score"], reverse=True)
+            related_products.sort(key=lambda x: x["final_score"], reverse=True)
+            
+            # Combine: RELEVANT first, then RELATED
+            final_ranked = relevant_products + related_products
+            
+            logger.info(f"Validation summary: {len(relevant_products)} RELEVANT, {len(related_products)} RELATED, {len(ranked_products) - len(final_ranked)} NOT_RELEVANT")
+            
+            return final_ranked[:top_k]
+            
         logger.info(f"✓ Hybrid search returned {len(ranked_products)} products")
-        
-        return ranked_products
+        return ranked_products[:top_k]

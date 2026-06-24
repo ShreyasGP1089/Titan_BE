@@ -45,7 +45,7 @@ class BudgetOptimizer:
     # Public API
     # ─────────────────────────────────────────────────────────────────────────
 
-    def optimize(self, items: List[TaskItem], budget: float) -> Dict:
+    def optimize(self, items: List[TaskItem], budget: float, user_profile: Optional[Dict[str, bool]] = None) -> Dict:
         """
         Optimize product selection within budget.
 
@@ -79,7 +79,7 @@ class BudgetOptimizer:
                 }
 
         # Score every product
-        self._score_all_products(items)
+        self._score_all_products(items, user_profile=user_profile, has_budget=True)
 
         # ── Mandatory items ───────────────────────────────────────────────
         mandatory_results = []
@@ -159,7 +159,7 @@ class BudgetOptimizer:
             # Full ranked list with savings attached, recommended first
             ranked = self._rank_products(item.products)
             item.recommended     = rec
-            item.products        = ranked
+            item.products        = ranked[:8]
             item.budget_allocated = result["cost"]
             updated_items.append(item)
 
@@ -168,11 +168,11 @@ class BudgetOptimizer:
             ranked = self._rank_products(item.products)
             if sel:
                 item.recommended      = _compute_savings(sel["recommended"])
-                item.products         = ranked
+                item.products         = ranked[:8]
                 item.budget_allocated = sel["cost"]
             else:
                 item.recommended      = None
-                item.products         = ranked
+                item.products         = ranked[:8]
                 item.budget_allocated = 0
             updated_items.append(item)
 
@@ -199,15 +199,15 @@ class BudgetOptimizer:
     # No-budget mode (discovery only — no recommended pick needed)
     # ─────────────────────────────────────────────────────────────────────────
 
-    def discover(self, items: List[TaskItem]) -> List[TaskItem]:
+    def discover(self, items: List[TaskItem], user_profile: Optional[Dict[str, bool]] = None) -> List[TaskItem]:
         """
         Rank products within each item without a budget constraint.
         Sets recommended = top-rated product, keeps full list for browsing.
         """
-        self._score_all_products(items)
+        self._score_all_products(items, user_profile=user_profile, has_budget=False)
         for item in items:
             ranked = self._rank_products(item.products)
-            item.products = ranked
+            item.products = ranked[:8]
             if ranked:
                 item.recommended      = _compute_savings(ranked[0])
                 item.budget_allocated = ranked[0].price
@@ -220,21 +220,37 @@ class BudgetOptimizer:
     # Internal helpers
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _score_all_products(self, items: List[TaskItem]) -> None:
+    def _score_all_products(self, items: List[TaskItem], user_profile: Optional[Dict[str, bool]] = None, has_budget: bool = False) -> None:
         all_products = [p for item in items for p in item.products]
         if not all_products:
             return
         max_price = max(p.price for p in all_products) or 1.0
         for item in items:
             for product in item.products:
-                self._product_scores[product.product_id] = self._score_product(product, max_price)
+                self._product_scores[product.product_id] = self._score_product(product, max_price, user_profile, has_budget)
 
-    def _score_product(self, product: Product, max_price: float) -> float:
-        """score = 0.5*rating + 0.3*semantic + 0.2*price_efficiency"""
-        rating_score = (product.rating / 5.0) if product.rating else 0.0
-        semantic     = min(1.0, max(0.0, product.similarity or 0.5))
-        price_eff    = max(0.0, 1.0 - (product.price / max_price)) if max_price > 0 else 0.0
-        return 0.5 * rating_score + 0.3 * semantic + 0.2 * price_eff
+    def _score_product(self, product: Product, max_price: float, user_profile: Optional[Dict[str, bool]] = None, has_budget: bool = False) -> float:
+        """score = 0.4*search + 0.2*validation + 0.2*profile + 0.2*budget_score"""
+        search_score = min(1.0, max(0.0, product.similarity or 0.5))
+        validation_score = min(1.0, max(0.0, product.validation_confidence or 0.5))
+        profile_score = min(1.0, max(0.0, product.profile_score or 1.0))
+        
+        # Calculate budget score based on profile and budget constraint
+        if user_profile and user_profile.get("budget_sensitive"):
+            budget_score = max(0.0, 1.0 - (product.price / max_price)) if max_price > 0 else 0.0
+        elif user_profile and user_profile.get("premium_intent"):
+            budget_score = (product.price / max_price) if max_price > 0 else 0.0
+        elif has_budget:
+            # Standard budget sensitivity when budget is set but no explicit query signal
+            budget_score = max(0.0, 1.0 - (product.price / max_price)) if max_price > 0 else 0.0
+        else:
+            # No budget constraint and no explicit price preference query signal
+            budget_score = 0.5 # neutral boost for all products
+            
+        return (0.4 * search_score
+                + 0.2 * validation_score
+                + 0.2 * profile_score
+                + 0.2 * budget_score)
 
     def _get_score(self, product: Product) -> float:
         return self._product_scores.get(product.product_id, 0.0)

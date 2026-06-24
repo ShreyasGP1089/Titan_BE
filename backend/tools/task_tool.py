@@ -3,12 +3,70 @@ Task Tool
 Executes task intent requests (activity-based shopping)
 """
 import logging
+import re
 from typing import List, Dict, Optional
 from models.schemas import TaskArguments, TaskResponse, TaskItem, Product
 from services.hybrid_search import HybridSearchService
 from tools.budget_optimizer import BudgetOptimizer
 
 logger = logging.getLogger(__name__)
+
+
+KIDS_QUERY_SIGNALS = ["kid", "kids", "child", "children", "son", "daughter", "boy", "boys", "girl", "girls", "junior"]
+BEGINNER_QUERY_SIGNALS = ["start", "begin", "beginner", "new to", "first time", "learn", "getting into", "try"]
+BUDGET_QUERY_SIGNALS = ["cheap", "budget", "affordable", "under", "low cost", "economical", "inexpensive", "value"]
+PREMIUM_QUERY_SIGNALS = ["best", "high-end", "premium", "professional", "advanced", "pro", "elite", "top"]
+
+KIDS_KEYWORDS = {"kids", "kid", "junior", "children", "child", "youth", "boy", "boys", "girl", "girls", "toddler", "toddlers"}
+
+
+def is_kids_product(product: Product) -> bool:
+    text = f"{product.name or ''} {product.description or ''} {product.category_level_1 or ''} {product.category_level_2 or ''}".lower()
+    words = re.findall(r'\b\w+\b', text)
+    return any(w in KIDS_KEYWORDS for w in words)
+
+
+def infer_user_profile(query: str) -> Dict[str, bool]:
+    q = (query or "").lower()
+    return {
+        "is_kids": any(signal in q for signal in KIDS_QUERY_SIGNALS),
+        "is_beginner": any(signal in q for signal in BEGINNER_QUERY_SIGNALS),
+        "budget_sensitive": any(signal in q for signal in BUDGET_QUERY_SIGNALS),
+        "premium_intent": any(signal in q for signal in PREMIUM_QUERY_SIGNALS),
+    }
+
+
+def compute_profile_score(product: Product, user_profile: Dict[str, bool]) -> float:
+    # Start with a base profile score of 1.0 (perfect match / neutral)
+    score = 1.0
+    
+    # 1. Kids check
+    is_kids = is_kids_product(product)
+    if user_profile["is_kids"]:
+        if not is_kids:
+            # User wants a kids product, but this is an adult product (mild mismatch)
+            score = min(score, 0.3)
+    else:
+        if is_kids:
+            # User wants an adult product, but this is a kids product (severe mismatch)
+            score = min(score, 0.1)
+            
+    # 2. Experience level check
+    product_name = (product.name or "").lower()
+    product_desc = (product.description or "").lower()
+    product_text = f"{product_name} {product_desc}"
+    
+    is_beginner_prod = any(kw in product_text for kw in ["beginner", "beginners", "start", "starting", "easy", "learn", "introduction", "first", "entry-level", "entry level", "basic"])
+    is_advanced_prod = any(kw in product_text for kw in ["advanced", "expert", "professional", "pro", "competition", "technical", "performance", "intensive"])
+    
+    if user_profile["is_beginner"]:
+        if is_advanced_prod and not is_beginner_prod:
+            score = min(score, 0.7)
+    elif user_profile["premium_intent"]:
+        if is_beginner_prod and not is_advanced_prod:
+            score = min(score, 0.7)
+            
+    return score
 
 
 # Hardcoded task definitions with validation keywords
@@ -138,12 +196,19 @@ class TaskTool:
         cat2 = (product.get('category_level_2') or '').lower()
         description = (product.get('description') or '').lower()
         
-        # First check negative keywords — reject if any match in name or description
+        # First check negative keywords — reject if any match as a full word/phrase in name or description
         if negative_keywords:
+            text_to_check = f"{product_name} {description}".lower()
+            product_words = set(re.findall(r'\b\w+\b', text_to_check))
             for neg_keyword in negative_keywords:
                 neg_lower = neg_keyword.lower()
-                if neg_lower in product_name or neg_lower in description:
-                    return False
+                # If negative keyword has spaces, check substring with word boundaries
+                if " " in neg_lower:
+                    if re.search(r'\b' + re.escape(neg_lower) + r'\b', text_to_check):
+                        return False
+                else:
+                    if neg_lower in product_words:
+                        return False
         
         # Then check if any validation keyword appears in product name or categories
         for keyword in validation_keywords:
@@ -183,6 +248,9 @@ class TaskTool:
         
         task_definition = TASKS[activity]
         
+        # Infer user profile once for the entire task
+        user_profile = infer_user_profile(arguments.query or "")
+        
         # Search products for each item
         items = []
         all_products = {}
@@ -201,13 +269,15 @@ class TaskTool:
             logger.info(f"  Validation: {validation_keywords}")
             logger.info(f"  Negative: {negative_keywords}")
             
-            # Search products — get top 10 for a richer discovery list
+            # Search products — get top 20 for a richer candidate pool
+            # Profile scoring needs enough candidates to re-rank (e.g., kids products
+            # often rank lower in generic search but should surface for kids queries)
             products = self.search_service.search(
                 sport=sport,
                 category_level_1=category,
                 keywords=keywords,
                 price_limit=budget,  # Pre-filter by budget if set
-                top_k=10
+                top_k=20
             )
             
             # Validate products - filter out mismatches
@@ -226,8 +296,15 @@ class TaskTool:
             if rejected_products:
                 logger.info(f"  ✓ Validated: {len(validated_products)}/{len(products)} products")
             
-            # Convert to Product objects (all validated, up to 8 for discovery)
-            product_objects = [Product(**p) for p in validated_products[:8]]
+            # Convert to Product objects (all validated, up to 20 for discovery/ranking)
+            product_objects = []
+            for p in validated_products:
+                p_dict = dict(p)
+                if "similarity" not in p_dict and "final_score" in p_dict:
+                    p_dict["similarity"] = p_dict["final_score"]
+                prod = Product(**p_dict)
+                prod.profile_score = compute_profile_score(prod, user_profile)
+                product_objects.append(prod)
             
             if not product_objects and mandatory:
                 logger.warning(f"  ⚠️  No valid products found for mandatory item: {item_name}")
@@ -252,7 +329,8 @@ class TaskTool:
             logger.info(f"Optimizing budget: ₹{budget}")
             optimized = self.budget_optimizer.optimize(
                 items=items,
-                budget=budget
+                budget=budget,
+                user_profile=user_profile
             )
 
             if not optimized.get("success", True):
@@ -265,7 +343,7 @@ class TaskTool:
             budget_remaining = optimized.get("budget_remaining")
         else:
             # No budget — rank products and set recommended for each item
-            items = self.budget_optimizer.discover(items)
+            items = self.budget_optimizer.discover(items, user_profile=user_profile)
             total_cost = sum(
                 item.budget_allocated for item in items
                 if item.budget_allocated and item.recommended
@@ -278,6 +356,7 @@ class TaskTool:
             total_cost=total_cost or None,
             within_budget=within_budget,
             items=items,
+            query=arguments.query,
         )
         
         logger.info(f"Task returned {len(items)} items")

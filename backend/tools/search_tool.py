@@ -39,7 +39,23 @@ class SearchTool:
         )
         
         # Convert to Product schema
-        product_objects = [Product(**p) for p in products]
+        normalized_products = []
+
+        for p in products:
+            p = dict(p)
+
+            if p.get("sport") is None:
+                p["sport"] = ""
+
+            if p.get("category_level_1") is None:
+                p["category_level_1"] = ""
+
+            if p.get("category_level_2") is None:
+                p["category_level_2"] = ""
+
+            normalized_products.append(p)
+
+        product_objects = [Product(**p) for p in normalized_products]
         
         response = SearchResponse(
             products=product_objects,

@@ -340,24 +340,67 @@ class QueryEndpoint(Resource):
             
             logger.info(f"Processing query: {user_query}")
             
-            # Step 1: Parse query with local model server
-            try:
-                parsed = model_client.parse(user_query)
-            except ConnectionError as e:
-                return {
-                    'error': 'Service Unavailable',
-                    'message': str(e)
-                }, 503
-            except TimeoutError as e:
-                return {
-                    'error': 'Gateway Timeout',
-                    'message': str(e)
-                }, 504
-            except Exception as e:
-                return {
-                    'error': 'Bad Gateway',
-                    'message': f'Model server error: {str(e)}'
-                }, 502
+            # Step 1: Parse query with local model server or intercept compare queries
+            parsed = None
+            user_query_lower = user_query.lower().strip()
+            import re
+            if re.match(r'^compare\s+', user_query_lower):
+                rest = user_query[8:].strip()
+                # Split by separators: " versus ", " vs ", " and "
+                parts = []
+                for sep in [" versus ", " vs ", " and "]:
+                    if sep in rest.lower():
+                        idx = rest.lower().find(sep)
+                        parts = [rest[:idx].strip(), rest[idx + len(sep):].strip()]
+                        break
+                
+                if len(parts) == 2:
+                    parsed = {
+                        "intent": "compare",
+                        "arguments": {
+                            "products": parts
+                        }
+                    }
+                    logger.info(f"Intercepted and parsed compare query directly: {parts}")
+            
+            # Intercept alternatives queries to extract product name directly
+            # Patterns: "alternatives to X", "show alternatives to X",
+            #           "find alternatives to X", "suggest alternatives for X"
+            if not parsed:
+                alt_match = re.match(
+                    r'^(?:show\s+|find\s+|suggest\s+)?(?:[\w\-]+\s+){0,2}alternatives?\s+(?:to|for)\s+(.+)$',
+                    user_query_lower
+                )
+                if alt_match:
+                    # Extract original-case product name using the match span
+                    product_name = user_query[alt_match.start(1):alt_match.end(1)].strip()
+                    if product_name:
+                        parsed = {
+                            "intent": "alternatives",
+                            "arguments": {
+                                "product": product_name
+                            }
+                        }
+                        logger.info(f"Intercepted and parsed alternatives query directly: product='{product_name}'")
+            
+            if not parsed:
+                try:
+                    parsed = model_client.parse(user_query)
+                except ConnectionError as e:
+                    return {
+                        'error': 'Service Unavailable',
+                        'message': str(e)
+                    }, 503
+                except TimeoutError as e:
+                    return {
+                        'error': 'Gateway Timeout',
+                        'message': str(e)
+                    }, 504
+                except Exception as e:
+                    return {
+                        'error': 'Bad Gateway',
+                        'message': f'Model server error: {str(e)}'
+                    }, 502
             
             intent = parsed.get('intent')
             
@@ -378,7 +421,15 @@ class QueryEndpoint(Resource):
                     
                 elif intent == 'task':
                     from models.schemas import TaskArguments
-                    task_arguments = TaskArguments(**parsed['arguments'])
+                    logger.info("=" * 80)
+                    logger.info(f"PARSED OUTPUT: {parsed}")
+                    logger.info("=" * 80)
+                    task_data = parsed.get("arguments") or parsed.get("task_request")
+                    task_arguments = TaskArguments(
+                        activity=task_data["activity"],
+                        budget=task_data.get("budget"),
+                        query=user_query
+                    )
                     result = task_tool.execute(task_arguments)
                     
                 elif intent == 'compare':
@@ -388,7 +439,11 @@ class QueryEndpoint(Resource):
                     
                 elif intent == 'alternatives':
                     from models.schemas import AlternativesArguments
-                    alternatives_arguments = AlternativesArguments(**parsed['arguments'])
+                    alt_data = parsed.get("arguments") or {}
+                    alternatives_arguments = AlternativesArguments(
+                        product=alt_data.get("product"),
+                        query=user_query
+                    )
                     result = alternatives_tool.execute(alternatives_arguments)
                 
                 else:

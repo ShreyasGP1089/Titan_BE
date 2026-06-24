@@ -6,7 +6,8 @@ Verifies that the server uses ChatML format correctly and produces valid JSON
 import requests
 import json
 
-LOCAL_URL = "http://localhost:8001"
+import os
+LOCAL_URL = os.getenv("LOCAL_MODEL_URL", "http://localhost:8000")
 
 def test_parse_query(query: str, expected_intent: str):
     """Test parse-query endpoint with ChatML format."""

@@ -17,7 +17,8 @@ sys.path.insert(0, str(Path(__file__).parent / "backend"))
 from local_model_client import LocalModelClient
 
 # Configuration
-LOCAL_URL = "http://localhost:8001"
+import os
+LOCAL_URL = os.getenv("LOCAL_MODEL_URL", "http://localhost:8000")
 
 def test_health():
     """Test health endpoint."""
