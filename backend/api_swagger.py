@@ -1,19 +1,27 @@
 """
-Decathlon Smart Shopping API - Production Version
-Qwen2.5-1.5B-Instruct + PostgreSQL + pgvector + Hybrid Search
+Decathlon Smart Shopping API - Single Public Endpoint
+Qwen3-4B + PostgreSQL + pgvector
+
+Architecture:
+    User → api_swagger.py → local_model_server.py → Tools → PostgreSQL
 """
-from flask import Flask, request
+from flask import Flask, request, jsonify
 from flask_restx import Api, Resource, fields
 from flask_cors import CORS
 import logging
 import os
+import requests
 import traceback
 from functools import wraps
-from tools import hybrid_search, get_categories, compare_products
-from db import initialize_pool, close_pool
-# NO local embedding model loading - use remote server
+from database import initialize_pool, close_pool
 import atexit
 from dotenv import load_dotenv
+
+# Import Tools
+from tools.search_tool import SearchTool
+from tools.task_tool import TaskTool
+from tools.compare_tool import CompareTool
+from tools.alternatives_tool import AlternativesTool
 
 load_dotenv()
 
@@ -23,16 +31,97 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Production uses Local Model Server (Mac) via HTTP
-logger.info("🚀 Starting API with Local Model Server (HTTP)")
-logger.info(f"   Model Server URL: {os.getenv('LOCAL_MODEL_URL', 'http://localhost:8001')}")
-from hf_planner import shopping_planner_hf, parse_query_with_local_model
-from local_model_client import get_client as get_model_client
-logger.info("✓ Local model client imported successfully")
-
+# Configuration
 API_KEY = os.getenv('API_KEY', 'decathlon_smart_search_2024_secure_key_abc123xyz')
+LOCAL_MODEL_URL = os.getenv('LOCAL_MODEL_URL', 'http://localhost:8000')
+
+logger.info("🚀 Starting Decathlon Smart Shopping API")
+logger.info(f"   Model Server: {LOCAL_MODEL_URL}")
+
+
+# ============================================================================
+# LOCAL MODEL CLIENT
+# ============================================================================
+
+class LocalModelClient:
+    """
+    Client for communicating with local_model_server.py
+    
+    Sends natural language queries and receives structured JSON.
+    """
+    
+    def __init__(self, base_url=None, timeout=30):
+        self.base_url = base_url or LOCAL_MODEL_URL
+        self.timeout = timeout
+        logger.info(f"LocalModelClient initialized: {self.base_url}")
+    
+    def parse(self, query: str) -> dict:
+        """
+        Parse natural language query into structured JSON.
+        
+        Args:
+            query: Natural language query
+        
+        Returns:
+            Structured JSON dict with intent and parameters
+        
+        Raises:
+            ConnectionError: If cannot connect to model server
+            TimeoutError: If request times out
+            ValueError: If response is invalid JSON
+        """
+        try:
+            logger.info(f"Parsing query: {query}")
+            
+            # Call local model server
+            response = requests.post(
+                f"{self.base_url}/parse-query",
+                json={"query": query},
+                timeout=self.timeout
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"Model server error: {response.status_code}")
+                logger.error(f"Response: {response.text}")
+                raise ValueError(f"Model server returned {response.status_code}")
+            
+            # Parse JSON
+            result = response.json()
+            
+            logger.info(f"✓ Parsed intent: {result.get('intent')}")
+            
+            return result
+            
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"Cannot connect to model server: {e}")
+            raise ConnectionError(
+                f"Cannot connect to model server at {self.base_url}. "
+                f"Is local_model_server.py running?"
+            )
+        except requests.exceptions.Timeout as e:
+            logger.error(f"Request timeout: {e}")
+            raise TimeoutError(f"Model server request timed out after {self.timeout}s")
+        except ValueError as e:
+            logger.error(f"Invalid JSON from model server: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error: {e}")
+            raise
+
+# Initialize client and tools
+model_client = LocalModelClient()
+search_tool = SearchTool()
+task_tool = TaskTool()
+compare_tool = CompareTool()
+alternatives_tool = AlternativesTool()
+
+
+# ============================================================================
+# FLASK APP & API
+# ============================================================================
 
 def require_api_key(f):
+    """API key authentication decorator"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
         provided_key = request.headers.get('Api-Key')
@@ -46,406 +135,766 @@ def require_api_key(f):
         return f(*args, **kwargs)
     return decorated_function
 
+
 app = Flask(__name__)
 CORS(app)
 
 api = Api(
     app,
-    version='1.0.0',
+    version='3.2.0',
     title='Decathlon Smart Shopping API',
-    description='AI-powered shopping search with Local Model Server + PostgreSQL + pgvector',
+    description='''
+    Unified API for natural language shopping queries with debug endpoints.
+    
+    **Production Endpoint:**
+        POST /api/v1/query - Full pipeline (NL → SLM → Tools → Results)
+    
+    **Debug Endpoints:**
+        POST /api/v1/debug/parse-query - Test SLM output only
+        POST /api/v1/debug/search - Test SearchTool directly
+        POST /api/v1/debug/task - Test TaskTool directly
+        POST /api/v1/debug/compare - Test CompareTool directly
+        POST /api/v1/debug/alternatives - Test AlternativesTool directly
+        POST /api/v1/debug/embedding - Test local embedding generation
+    
+    **Architecture:**
+        User → /api/v1/query → Local Model Server → Tools → PostgreSQL
+    
+    **Supported queries:**
+        - "running shoes under 5000" (search)
+        - "I want to start playing golf" (task)
+        - "compare MH500 and NH500" (compare)
+        - "alternatives to MH500" (alternatives)
+    ''',
     doc='/docs',
     prefix='/api/v1',
     authorizations={
         'apiKey': {
             'type': 'apiKey',
             'in': 'header',
-            'name': 'API-KEY'
+            'name': 'Api-Key'
         }
     },
     security='apiKey'
 )
 
-# Global initialization flags
+# Global initialization
 _initialized = False
 
+
 def initialize():
-    """
-    Initialize application resources exactly once.
-    Loads: PostgreSQL pool
-    NO MODEL LOADING - uses remote model server via HTTP for ALL ML inference
-    """
+    """Initialize application resources"""
     global _initialized
     
     if _initialized:
-        logger.debug("⏭️  Already initialized, skipping...")
         return
     
     logger.info("=" * 80)
-    logger.info("🔧 INITIALIZING RENDER BACKEND (Thin API Gateway)")
+    logger.info("INITIALIZING API")
     logger.info("=" * 80)
     
     try:
-        # Step 1: Database connection pool
-        logger.info("1️⃣  Initializing PostgreSQL connection pool...")
+        # Initialize database
+        logger.info("Initializing PostgreSQL connection pool...")
         initialize_pool(minconn=2, maxconn=20)
-        logger.info("✓ PostgreSQL pool ready")
+        logger.info("✓ PostgreSQL ready")
         
-        # Step 2: Verify remote model server
-        logger.info("2️⃣  Verifying remote model server connection...")
-        local_model_url = os.getenv('LOCAL_MODEL_URL', 'http://localhost:8001')
-        logger.info(f"   LOCAL_MODEL_URL: {local_model_url}")
-        logger.info("   ✓ Using remote embedding server (NO local models)")
-        logger.info("   ✓ Using remote Qwen planner (NO local models)")
-        
+        # Check model server
+        logger.info("Checking model server...")
         try:
-            client = get_model_client()
-            health = client.health_check()
-            logger.info(f"✓ Model server healthy")
-            logger.info(f"   LLM: {health.get('model', 'unknown')}")
-            logger.info(f"   Device: {health.get('device', 'unknown')}")
-            logger.info(f"   Adapter loaded: {health.get('adapter_loaded', False)}")
+            response = requests.get(f"{LOCAL_MODEL_URL}/health", timeout=5)
+            if response.status_code == 200:
+                health = response.json()
+                logger.info(f"✓ Model server connected")
+                logger.info(f"   Model: {health.get('model', 'unknown')}")
+                logger.info(f"   Device: {health.get('device', 'unknown')}")
+            else:
+                logger.warning(f"⚠️  Model server unhealthy: {response.status_code}")
         except Exception as e:
             logger.warning(f"⚠️  Model server not reachable: {e}")
-            logger.warning("   Model requests will fail until server is started")
-            logger.warning("   Start with: python3 local_model_server.py")
-            logger.warning("   Expose with: ngrok http 8001")
+            logger.warning("   Queries will fail until server is started")
         
         _initialized = True
         
         logger.info("=" * 80)
-        logger.info("✅ BACKEND READY (Thin API Gateway)")
+        logger.info("✅ API READY")
         logger.info("=" * 80)
-        logger.info("Memory footprint:")
-        logger.info("  • PostgreSQL client: ~50 MB")
-        logger.info("  • Flask + dependencies: ~100 MB")
-        logger.info("  • NO torch: 0 MB ✓")
-        logger.info("  • NO sentence-transformers: 0 MB ✓")
-        logger.info("  • NO Qwen model: 0 MB ✓")
-        logger.info("  Expected total: ~150-250 MB (fits in 512 MB free tier) ✓")
+        logger.info("Production Endpoint:")
+        logger.info("  POST /api/v1/query")
+        logger.info("")
+        logger.info("Debug Endpoints:")
+        logger.info("  POST /api/v1/debug/parse-query")
+        logger.info("  POST /api/v1/debug/search")
+        logger.info("  POST /api/v1/debug/task")
+        logger.info("  POST /api/v1/debug/compare")
+        logger.info("  POST /api/v1/debug/alternatives")
+        logger.info("  POST /api/v1/debug/embedding")
+        logger.info("")
+        logger.info("System:")
+        logger.info("  GET  /api/v1/system/health")
+        logger.info("  GET  /docs (Swagger UI)")
         logger.info("=" * 80)
         
     except Exception as e:
-        logger.error("=" * 80)
-        logger.error("❌ INITIALIZATION FAILED")
-        logger.error("=" * 80)
-        logger.error(f"Error: {e}")
+        logger.error(f"❌ Initialization failed: {e}")
         logger.error(traceback.format_exc())
         raise
 
+
 atexit.register(close_pool)
 
-# Define API namespaces
-ns_shopping = api.namespace('shopping', description='Shopping and search operations')
-ns_products = api.namespace('products', description='Product information')
-ns_system = api.namespace('system', description='System health')
+# Namespaces
+ns_query = api.namespace('query', description='Main query endpoint')
+ns_system = api.namespace('system', description='System endpoints')
+ns_debug = api.namespace('debug', description='Debug endpoints for testing individual components')
 
-# Request/response models
-search_request = api.model('SearchRequest', {
-    'query': fields.String(required=True, description='Search query', example='yoga mat'),
-    'sport': fields.String(description='Filter by sport', example='Yoga'),
-    'price_limit': fields.Float(description='Max price', example=2000.0),
-    'limit': fields.Integer(description='Result limit', default=10, example=5)
-})
-
-smart_search_request = api.model('SmartSearchRequest', {
-    'query': fields.String(required=True, description='Natural language query', 
-                          example='Horse riding boots for kids below 3000')
+# Request/Response models
+query_request = api.model('QueryRequest', {
+    'query': fields.String(
+        required=True,
+        description='Natural language query',
+        example='running shoes under 5000'
+    )
 })
 
 parse_query_request = api.model('ParseQueryRequest', {
-    'query': fields.String(required=True, description='Query to parse', 
-                          example='Horse riding boots for kids below 3000')
-})
-
-product_model = api.model('Product', {
-    'product_id': fields.String(description='Product ID'),
-
-    'name': fields.String(
-        description='Product name'
-    ),
-
-    'brand': fields.String(
-        description='Brand'
-    ),
-
-    'price': fields.Float(
-        description='Price in INR'
-    ),
-
-    'sport': fields.String(
-        description='Sport category'
-    ),
-
-    'rating': fields.Float(
-        description='Rating (0-5)'
-    ),
-
-    'image_url': fields.String(
-        description='Product image URL'
-    ),
-
-    'product_url': fields.String(
-        description='Product webpage URL'
-    ),
-
-    'similarity_score': fields.Float(
-        description='Similarity (0-1)'
+    'query': fields.String(
+        required=True,
+        description='Natural language query to parse',
+        example='running shoes under 5000'
     )
 })
 
-search_response = api.model('SearchResponse', {
-    'query': fields.String(description='Original query'),
-    'count': fields.Integer(description='Result count'),
-    'results': fields.List(fields.Nested(product_model))
+search_request = api.model('SearchRequest', {
+    'sport': fields.String(required=True, description='Sport category', example='Running'),
+    'category_level_1': fields.String(required=False, description='Category level 1', example='Footwear'),
+    'category_level_2': fields.String(required=False, description='Category level 2'),
+    'keywords': fields.List(fields.String, required=False, description='Search keywords', example=['running', 'shoes']),
+    'price_limit': fields.Float(required=False, description='Maximum price', example=5000)
 })
 
-smart_search_response = api.model('SmartSearchResponse', {
-    'status': fields.String(description='Status', example='success'),
-    'user_query': fields.String(description='Original query'),
-    'parsed_query': fields.Raw(description='Structured query'),
-    'intent': fields.String(description='Intent', example='search'),
-    'recommendations': fields.Raw(description='AI recommendations'),
-    'products': fields.List(fields.Nested(product_model)),
-    'metadata': fields.Raw(description='Metadata')
+task_request = api.model('TaskRequest', {
+    'activity': fields.String(required=True, description='Activity name', example='Golf'),
+    'budget': fields.Float(required=False, description='Total budget', example=10000)
 })
 
-parse_query_response = api.model('ParseQueryResponse', {
-    'status': fields.String(description='Status'),
-    'user_query': fields.String(description='Original query'),
-    'parsed_query': fields.Raw(description='Parsed JSON'),
-    'intent': fields.String(description='Intent'),
-    'metadata': fields.Raw(description='Metadata')
+compare_request = api.model('CompareRequest', {
+    'products': fields.List(fields.String, required=True, description='Product IDs', example=['MH500', 'NH500'])
 })
 
-error_response = api.model('ErrorResponse', {
-    'error': fields.String(description='Error type'),
-    'message': fields.String(description='Error message')
+alternatives_request = api.model('AlternativesRequest', {
+    'product': fields.String(required=True, description='Product ID', example='MH500')
+})
+
+embedding_request = api.model('EmbeddingRequest', {
+    'text': fields.String(required=True, description='Text to embed', example='running shoes')
 })
 
 
-@ns_shopping.route('/search')
-class Search(Resource):
-    @api.doc('search_products')
-    @api.expect(search_request)
-    @api.marshal_with(search_response, code=200)
-    @api.response(400, 'Bad Request', error_response)
-    @api.response(500, 'Internal Server Error', error_response)
-    def post(self):
-        """Semantic product search with optional filters"""
-        initialize()
-        try:
-            data = request.get_json()
-            
-            if not data or 'query' not in data:
-                return {'error': 'Missing field', 'message': "'query' required"}, 400
-            
-            query = data['query']
-            sport = data.get('sport')
-            price_limit = data.get('price_limit')
-            limit = data.get('limit', 10)
-            
-            logger.info(f"🔍 Search: {query}")
-            results = hybrid_search(query, sport=sport, price_limit=price_limit, limit=limit)
-            logger.info(f"✓ Found {len(results)} products")
-            
-            return {
-                'query': query,
-                'count': len(results),
-                'results': results
-            }, 200
-            
-        except Exception as e:
-            logger.error(f"❌ Search error: {e}")
-            logger.error(traceback.format_exc())
-            return {'error': 'Internal server error', 'message': str(e)}, 500
+# ============================================================================
+# ENDPOINTS
+# ============================================================================
 
-
-@ns_shopping.route('/smart-search')
-class SmartSearch(Resource):
-    @api.doc('smart_search', security='apiKey')
-    @api.expect(smart_search_request)
-    @api.marshal_with(smart_search_response, code=200)
-    @api.response(401, 'Unauthorized', error_response)
-    @api.response(403, 'Forbidden', error_response)
-    @api.response(400, 'Bad Request', error_response)
-    @api.response(500, 'Internal Server Error', error_response)
-    @api.response(503, 'Service Unavailable', error_response)
+@ns_query.route('')
+class QueryEndpoint(Resource):
+    """Single unified query endpoint"""
+    
+    @api.doc('execute_query')
+    @api.expect(query_request)
+    @api.response(200, 'Success')
+    @api.response(400, 'Bad Request')
+    @api.response(401, 'Unauthorized')
+    @api.response(500, 'Internal Server Error')
     @require_api_key
     def post(self):
         """
-        AI-powered smart search with Local Model Server
+        Execute natural language query
         
-        Pipeline:
-        1. Local Model Server parses query → Structured JSON
-        2. Hybrid search: Keyword + Semantic (pgvector)
-        3. Local Model Server generates natural language response
+        Examples:
+        - "running shoes under 5000"
+        - "waterproof hiking shoes"
+        - "I want to start playing golf"
+        - "golf equipment under 15000"
+        - "compare MH500 and NH500"
+        - "alternatives to MH500"
         """
+        # Initialize
         initialize()
         
         try:
             data = request.get_json()
             
             if not data or 'query' not in data:
-                return {'error': 'Missing field', 'message': "'query' required"}, 400
+                return {
+                    'error': 'Bad Request',
+                    'message': 'Query field required'
+                }, 400
             
             user_query = data['query'].strip()
             
             if not user_query:
-                return {'error': 'Invalid input', 'message': 'Query cannot be empty'}, 400
-            
-            logger.info("=" * 80)
-            logger.info(f"🧠 SMART SEARCH REQUEST")
-            logger.info(f"Query: {user_query}")
-            logger.info("=" * 80)
-            
-            # Use complete HuggingFace planner pipeline
-            result = shopping_planner_hf(user_query)
-            
-            if result.get('status') == 'error':
-                logger.error(f"❌ Planner returned error: {result.get('error')}")
                 return {
-                    'error': 'Search failed',
-                    'message': result.get('error', 'Unknown error')
-                }, 500
+                    'error': 'Bad Request',
+                    'message': 'Query cannot be empty'
+                }, 400
             
-            products_found = result.get('metadata', {}).get('products_found', 0)
-            logger.info(f"✓ Smart search complete: {products_found} products")
-            logger.info("=" * 80)
+            logger.info(f"Processing query: {user_query}")
             
-            return result, 200
-            
-        except FileNotFoundError as e:
-            logger.error("=" * 80)
-            logger.error("❌ MODEL NOT FOUND")
-            logger.error(f"Error: {e}")
-            logger.error("=" * 80)
-            return {
-                'error': 'Model not found',
-                'message': 'Fine-tuned model not available'
-            }, 503
-            
-        except Exception as e:
-            logger.error("=" * 80)
-            logger.error("❌ SMART SEARCH ERROR")
-            logger.error(f"Error: {e}")
-            logger.error(traceback.format_exc())
-            logger.error("=" * 80)
-            return {'error': 'Internal server error', 'message': str(e)}, 500
-
-
-@ns_shopping.route('/parse-query')
-class ParseQuery(Resource):
-    @api.doc('parse_query')
-    @api.expect(parse_query_request)
-    @api.marshal_with(parse_query_response, code=200)
-    @api.response(400, 'Bad Request', error_response)
-    @api.response(500, 'Internal Server Error', error_response)
-    @api.response(503, 'Service Unavailable', error_response)
-    def post(self):
-        """
-        Parse natural language query to structured JSON
-        
-        Uses Local Model Server (Qwen2.5-1.5B-Instruct) to extract:
-        - Sport category
-        - Product category
-        - Keywords
-        - Price limit
-        - Experience level
-        """
-        initialize()
-        
-        try:
-            data = request.get_json()
-            
-            if not data or 'query' not in data:
-                return {'error': 'Missing field', 'message': "'query' required"}, 400
-            
-            user_query = data['query'].strip()
-            
-            if not user_query:
-                return {'error': 'Invalid input', 'message': 'Query cannot be empty'}, 400
-            
-            logger.info(f"🧩 Parse query request: {user_query}")
-            
-            import time
-            start_time = time.time()
-            
-            logger.info("📤 Calling parse_query_with_local_model...")
-            parsed_query = parse_query_with_local_model(user_query)
-            logger.info("📥 Parse function returned")
-            
-            parse_time_ms = int((time.time() - start_time) * 1000)
-            
-            if not parsed_query:
-                logger.error("❌ Parser returned None")
+            # Step 1: Parse query with local model server
+            try:
+                parsed = model_client.parse(user_query)
+            except ConnectionError as e:
                 return {
-                    'error': 'Parse failed',
-                    'message': 'Failed to parse query'
+                    'error': 'Service Unavailable',
+                    'message': str(e)
+                }, 503
+            except TimeoutError as e:
+                return {
+                    'error': 'Gateway Timeout',
+                    'message': str(e)
+                }, 504
+            except Exception as e:
+                return {
+                    'error': 'Bad Gateway',
+                    'message': f'Model server error: {str(e)}'
+                }, 502
+            
+            intent = parsed.get('intent')
+            
+            if not intent:
+                return {
+                    'error': 'Bad Request',
+                    'message': 'Invalid response from model server (missing intent)'
+                }, 400
+            
+            logger.info(f"Intent: {intent}")
+            
+            # Step 2: Route to appropriate tool
+            try:
+                if intent == 'search':
+                    from models.schemas import SearchRequest
+                    search_request = SearchRequest(**parsed['search_request'])
+                    result = search_tool.execute(search_request)
+                    
+                elif intent == 'task':
+                    from models.schemas import TaskArguments
+                    task_arguments = TaskArguments(**parsed['arguments'])
+                    result = task_tool.execute(task_arguments)
+                    
+                elif intent == 'compare':
+                    from models.schemas import CompareArguments
+                    compare_arguments = CompareArguments(**parsed['arguments'])
+                    result = compare_tool.execute(compare_arguments)
+                    
+                elif intent == 'alternatives':
+                    from models.schemas import AlternativesArguments
+                    alternatives_arguments = AlternativesArguments(**parsed['arguments'])
+                    result = alternatives_tool.execute(alternatives_arguments)
+                
+                else:
+                    return {
+                        'error': 'Bad Request',
+                        'message': f'Unknown intent: {intent}'
+                    }, 400
+                
+                # Step 3: Return result
+                response = result.dict()
+                response['query'] = user_query
+                
+                logger.info(f"✓ Query processed successfully")
+                
+                return response, 200
+                
+            except ValueError as e:
+                logger.error(f"Validation error: {e}")
+                return {
+                    'error': 'Bad Request',
+                    'message': str(e)
+                }, 400
+            except Exception as e:
+                logger.error(f"Tool execution error: {e}")
+                logger.error(traceback.format_exc())
+                return {
+                    'error': 'Internal Server Error',
+                    'message': str(e)
                 }, 500
-            
-            response = {
-                'status': 'success',
-                'user_query': user_query,
-                'parsed_query': parsed_query,
-                'intent': parsed_query.get('intent', 'unknown'),
-                'metadata': {
-                    'model': 'Qwen2.5-1.5B-Instruct (Local Server)',
-                    'parse_time_ms': parse_time_ms
-                }
-            }
-            
-            logger.info(f"✓ Parse complete: intent={response['intent']}, time={parse_time_ms}ms")
-            return response, 200
-            
-        except FileNotFoundError as e:
-            logger.error(f"❌ Model not found: {e}")
-            return {
-                'error': 'Model not found',
-                'message': 'Fine-tuned model not available'
-            }, 503
-            
+        
         except Exception as e:
-            logger.error(f"❌ Parse error: {e}")
+            logger.error(f"Unexpected error: {e}")
             logger.error(traceback.format_exc())
-            return {'error': 'Internal server error', 'message': str(e)}, 500
-
-
-@ns_products.route('/categories')
-class Categories(Resource):
-    @api.doc('get_categories')
-    def get(self):
-        """Get all available sports and category combinations"""
-        initialize()
-        try:
-            results = get_categories()
-            return {'count': len(results), 'categories': results}, 200
-        except Exception as e:
-            logger.error(f"Categories error: {e}", exc_info=True)
-            return {'error': 'Internal server error', 'message': str(e)}, 500
+            return {
+                'error': 'Internal Server Error',
+                'message': 'An unexpected error occurred'
+            }, 500
 
 
 @ns_system.route('/health')
-class Health(Resource):
+class HealthEndpoint(Resource):
+    """System health check"""
+    
     @api.doc('health_check')
     def get(self):
-        """Health check endpoint - does NOT initialize models"""
-        return {
+        """
+        Check system health
+        
+        Returns status of:
+        - Model server connection
+        - Database connection
+        """
+        health_status = {
             'status': 'healthy',
-            'version': '1.0.0',
-            'planner': 'HuggingFace + PEFT'
-        }, 200
+            'api': 'running',
+            'model_server': 'unknown',
+            'database': 'unknown'
+        }
+        
+        # Check model server
+        try:
+            response = requests.get(f"{LOCAL_MODEL_URL}/health", timeout=5)
+            if response.status_code == 200:
+                health_status['model_server'] = 'connected'
+                model_info = response.json()
+                health_status['model'] = model_info.get('model', 'unknown')
+            else:
+                health_status['model_server'] = 'unhealthy'
+                health_status['status'] = 'degraded'
+        except:
+            health_status['model_server'] = 'disconnected'
+            health_status['status'] = 'degraded'
+        
+        # Check database
+        try:
+            from database import connect_db, release_connection
+            conn = connect_db()
+            release_connection(conn)
+            health_status['database'] = 'connected'
+        except:
+            health_status['database'] = 'disconnected'
+            health_status['status'] = 'unhealthy'
+        
+        status_code = 200 if health_status['status'] == 'healthy' else 503
+        
+        return health_status, status_code
+
+
+@ns_system.route('/categories')
+class CategoriesEndpoint(Resource):
+    """Knowledge base category explorer"""
+    
+    @api.doc('get_categories')
+    @api.response(200, 'Success')
+    @api.response(500, 'Database error')
+    def get(self):
+        """
+        Get all product categories in the knowledge base.
+        
+        Returns a structured breakdown of:
+        - All sports with total product counts
+        - Category level 1 and 2 combinations per sport
+        - Price ranges per category
+        - Summary statistics
+        
+        Useful for:
+        - Exploring what products are in the KB
+        - Training data generation
+        - Frontend category browsing
+        """
+        try:
+            from database import connect_db, release_connection
+            from psycopg2.extras import RealDictCursor
+
+            conn = connect_db()
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+
+            try:
+                # Per-sport summary
+                cur.execute("""
+                    SELECT
+                        sport,
+                        COUNT(*) AS product_count,
+                        ROUND(MIN(price)::numeric, 0) AS min_price,
+                        ROUND(MAX(price)::numeric, 0) AS max_price,
+                        ROUND(AVG(price)::numeric, 0) AS avg_price
+                    FROM products
+                    WHERE sport IS NOT NULL AND sport != ''
+                    GROUP BY sport
+                    ORDER BY product_count DESC
+                """)
+                sports_raw = cur.fetchall()
+
+                # Per-sport + category breakdown
+                cur.execute("""
+                    SELECT
+                        COALESCE(sport, '') AS sport,
+                        COALESCE(category_level_1, '') AS category_level_1,
+                        COALESCE(category_level_2, '') AS category_level_2,
+                        COUNT(*) AS product_count,
+                        ROUND(MIN(price)::numeric, 0) AS min_price,
+                        ROUND(MAX(price)::numeric, 0) AS max_price
+                    FROM products
+                    WHERE sport IS NOT NULL AND sport != ''
+                    GROUP BY sport, category_level_1, category_level_2
+                    ORDER BY sport, product_count DESC
+                """)
+                cats_raw = cur.fetchall()
+
+                # Totals
+                cur.execute("SELECT COUNT(*) AS total FROM products")
+                total = cur.fetchone()['total']
+
+                cur.execute("""
+                    SELECT COUNT(*) AS total
+                    FROM products
+                    WHERE sport IS NOT NULL AND sport != ''
+                """)
+                with_sport = cur.fetchone()['total']
+
+            finally:
+                cur.close()
+                release_connection(conn)
+
+            # Build structured response grouped by sport
+            sports_map = {}
+            for row in sports_raw:
+                sports_map[row['sport']] = {
+                    'sport': row['sport'],
+                    'product_count': row['product_count'],
+                    'price_range': {
+                        'min': float(row['min_price']) if row['min_price'] else None,
+                        'max': float(row['max_price']) if row['max_price'] else None,
+                        'avg': float(row['avg_price']) if row['avg_price'] else None
+                    },
+                    'categories': []
+                }
+
+            for row in cats_raw:
+                sport = row['sport']
+                if sport in sports_map:
+                    sports_map[sport]['categories'].append({
+                        'category_level_1': row['category_level_1'] or None,
+                        'category_level_2': row['category_level_2'] or None,
+                        'product_count': row['product_count'],
+                        'price_range': {
+                            'min': float(row['min_price']) if row['min_price'] else None,
+                            'max': float(row['max_price']) if row['max_price'] else None
+                        }
+                    })
+
+            return {
+                'summary': {
+                    'total_products': total,
+                    'products_with_sport': with_sport,
+                    'products_without_sport': total - with_sport,
+                    'total_sports': len(sports_map)
+                },
+                'sports': list(sports_map.values())
+            }, 200
+
+        except Exception as e:
+            logger.error(f"Categories endpoint error: {e}")
+            return {'error': str(e)}, 500
+
+
+# ============================================================================
+# DEBUG ENDPOINTS
+# ============================================================================
+
+@ns_debug.route('/parse-query')
+class ParseQueryEndpoint(Resource):
+    """Debug endpoint: Test SLM output only"""
+    
+    @api.doc('parse_query_debug')
+    @api.expect(parse_query_request)
+    @api.response(200, 'Success')
+    @api.response(503, 'Model server unavailable')
+    @require_api_key
+    def post(self):
+        """
+        Parse natural language query using SLM (debug)
+        
+        Returns ONLY the structured JSON from the model server.
+        Does NOT execute any tools.
+        
+        Useful for testing:
+        - Model server connectivity
+        - Intent classification accuracy
+        - Parameter extraction
+        """
+        initialize()
+        
+        try:
+            data = request.get_json()
+            
+            if not data or 'query' not in data:
+                return {'error': 'Query field required'}, 400
+            
+            user_query = data['query'].strip()
+            
+            if not user_query:
+                return {'error': 'Query cannot be empty'}, 400
+            
+            logger.info(f"[DEBUG] Parsing query: {user_query}")
+            
+            # Call model server directly
+            try:
+                parsed = model_client.parse(user_query)
+                logger.info(f"[DEBUG] ✓ Parsed successfully")
+                return parsed, 200
+                
+            except ConnectionError as e:
+                return {'error': 'Service Unavailable', 'message': str(e)}, 503
+            except TimeoutError as e:
+                return {'error': 'Gateway Timeout', 'message': str(e)}, 504
+            except Exception as e:
+                return {'error': 'Model server error', 'message': str(e)}, 502
+        
+        except Exception as e:
+            logger.error(f"[DEBUG] Parse query error: {e}")
+            return {'error': str(e)}, 500
+
+
+@ns_debug.route('/search')
+class SearchDebugEndpoint(Resource):
+    """Debug endpoint: Test SearchTool directly"""
+    
+    @api.doc('search_debug')
+    @api.expect(search_request)
+    @api.response(200, 'Success')
+    @require_api_key
+    def post(self):
+        """
+        Execute SearchTool directly (debug)
+        
+        Bypasses SLM - accepts structured search parameters directly.
+        
+        Useful for testing:
+        - HybridSearch functionality
+        - Database queries
+        - Product filtering and ranking
+        """
+        initialize()
+        
+        try:
+            data = request.get_json()
+            
+            logger.info(f"[DEBUG] SearchTool with params: {data}")
+            
+            from models.schemas import SearchRequest
+            search_request_obj = SearchRequest(**data)
+            result = search_tool.execute(search_request_obj)
+            
+            logger.info(f"[DEBUG] ✓ SearchTool returned {result.total} products")
+            
+            return result.dict(), 200
+            
+        except ValueError as e:
+            logger.error(f"[DEBUG] Validation error: {e}")
+            return {'error': 'Validation error', 'message': str(e)}, 400
+        except Exception as e:
+            logger.error(f"[DEBUG] SearchTool error: {e}")
+            logger.error(traceback.format_exc())
+            return {'error': str(e)}, 500
+
+
+@ns_debug.route('/task')
+class TaskDebugEndpoint(Resource):
+    """Debug endpoint: Test TaskTool directly"""
+    
+    @api.doc('task_debug')
+    @api.expect(task_request)
+    @api.response(200, 'Success')
+    @require_api_key
+    def post(self):
+        """
+        Execute TaskTool directly (debug)
+        
+        Bypasses SLM - accepts activity and budget directly.
+        
+        Useful for testing:
+        - Task item generation
+        - Product search for each item
+        - Budget optimizer
+        - Item selection logic
+        """
+        initialize()
+        
+        try:
+            data = request.get_json()
+            
+            logger.info(f"[DEBUG] TaskTool with params: {data}")
+            
+            from models.schemas import TaskArguments
+            task_arguments = TaskArguments(**data)
+            result = task_tool.execute(task_arguments)
+            
+            logger.info(f"[DEBUG] ✓ TaskTool returned {len(result.items)} items")
+            if result.total_cost:
+                logger.info(f"[DEBUG]   Total cost: ₹{result.total_cost}")
+            
+            return result.dict(), 200
+            
+        except ValueError as e:
+            logger.error(f"[DEBUG] Validation error: {e}")
+            return {'error': 'Validation error', 'message': str(e)}, 400
+        except Exception as e:
+            logger.error(f"[DEBUG] TaskTool error: {e}")
+            logger.error(traceback.format_exc())
+            return {'error': str(e)}, 500
+
+
+@ns_debug.route('/compare')
+class CompareDebugEndpoint(Resource):
+    """Debug endpoint: Test CompareTool directly"""
+    
+    @api.doc('compare_debug')
+    @api.expect(compare_request)
+    @api.response(200, 'Success')
+    @require_api_key
+    def post(self):
+        """
+        Execute CompareTool directly (debug)
+        
+        Bypasses SLM - accepts product IDs directly.
+        
+        Useful for testing:
+        - Product retrieval by ID
+        - Database queries
+        - Product data completeness
+        """
+        initialize()
+        
+        try:
+            data = request.get_json()
+            
+            logger.info(f"[DEBUG] CompareTool with params: {data}")
+            
+            from models.schemas import CompareArguments
+            compare_arguments = CompareArguments(**data)
+            result = compare_tool.execute(compare_arguments)
+            
+            logger.info(f"[DEBUG] ✓ CompareTool returned {len(result.products)} products")
+            
+            return result.dict(), 200
+            
+        except ValueError as e:
+            logger.error(f"[DEBUG] Validation error: {e}")
+            return {'error': 'Validation error', 'message': str(e)}, 400
+        except Exception as e:
+            logger.error(f"[DEBUG] CompareTool error: {e}")
+            logger.error(traceback.format_exc())
+            return {'error': str(e)}, 500
+
+
+@ns_debug.route('/alternatives')
+class AlternativesDebugEndpoint(Resource):
+    """Debug endpoint: Test AlternativesTool directly"""
+    
+    @api.doc('alternatives_debug')
+    @api.expect(alternatives_request)
+    @api.response(200, 'Success')
+    @require_api_key
+    def post(self):
+        """
+        Execute AlternativesTool directly (debug)
+        
+        Bypasses SLM - accepts product ID directly.
+        
+        Useful for testing:
+        - Alternative product discovery
+        - Similarity logic
+        - Price range filtering
+        """
+        initialize()
+        
+        try:
+            data = request.get_json()
+            
+            logger.info(f"[DEBUG] AlternativesTool with params: {data}")
+            
+            from models.schemas import AlternativesArguments
+            alternatives_arguments = AlternativesArguments(**data)
+            result = alternatives_tool.execute(alternatives_arguments)
+            
+            logger.info(f"[DEBUG] ✓ AlternativesTool returned {result.total} alternatives")
+            
+            return result.dict(), 200
+            
+        except ValueError as e:
+            logger.error(f"[DEBUG] Validation error: {e}")
+            return {'error': 'Validation error', 'message': str(e)}, 400
+        except Exception as e:
+            logger.error(f"[DEBUG] AlternativesTool error: {e}")
+            logger.error(traceback.format_exc())
+            return {'error': str(e)}, 500
+
+
+@ns_debug.route('/embedding')
+class EmbeddingDebugEndpoint(Resource):
+    """Debug endpoint: Test local embedding generation"""
+    
+    @api.doc('embedding_debug')
+    @api.expect(embedding_request)
+    @api.response(200, 'Success')
+    @require_api_key
+    def post(self):
+        """
+        Generate embedding for text (debug)
+        
+        Tests local sentence-transformers embedding generation.
+        NO HTTP calls to model server.
+        
+        Useful for testing:
+        - Embedding service functionality
+        - Embedding dimensions (384)
+        - Vector normalization
+        """
+        initialize()
+        
+        try:
+            data = request.get_json()
+            
+            if not data or 'text' not in data:
+                return {'error': 'Text field required'}, 400
+            
+            text = data['text'].strip()
+            
+            if not text:
+                return {'error': 'Text cannot be empty'}, 400
+            
+            logger.info(f"[DEBUG] Generating embedding for: {text}")
+            
+            # Import embedding module
+            from embedding import get_embedding
+            
+            # Generate embedding
+            embedding = get_embedding(text)
+            
+            # Calculate norm to verify normalization
+            import numpy as np
+            norm = float(np.linalg.norm(embedding))
+            
+            logger.info(f"[DEBUG] ✓ Embedding generated")
+            logger.info(f"[DEBUG]   Dimension: {len(embedding)}")
+            logger.info(f"[DEBUG]   Norm: {norm:.6f}")
+            
+            return {
+                'text': text,
+                'dimension': len(embedding),
+                'embedding_preview': embedding[:10],  # First 10 values
+                'norm': norm,
+                'model': 'sentence-transformers/all-MiniLM-L6-v2',
+                'note': 'Embedding generated locally (no HTTP call to model server)'
+            }, 200
+            
+        except Exception as e:
+            logger.error(f"[DEBUG] Embedding error: {e}")
+            logger.error(traceback.format_exc())
+            return {'error': str(e)}, 500
 
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.getenv('PORT', 5000))
+    debug = os.getenv('DEBUG', 'false').lower() == 'true'
     
-    logger.info(f"🚀 Starting Flask app on 0.0.0.0:{port}")
-    logger.info("   Model inference via LOCAL_MODEL_URL (no local model loading)")
-    logger.info(f"   LOCAL_MODEL_URL={os.getenv('LOCAL_MODEL_URL', 'http://localhost:8001')}")
-    
-    app.run(
-        host="0.0.0.0",
-        port=port,
-        debug=False
-    )
+    logger.info(f"Starting API on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=debug)

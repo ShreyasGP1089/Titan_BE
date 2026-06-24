@@ -1,0 +1,177 @@
+QUICK FILE REFERENCE
+====================
+
+## 🚀 START HERE
+
+```bash
+./start_system.sh                    # Start everything
+```
+
+## 📁 CORE FILES (Active System)
+
+### Entry Points
+```
+🚀 start_system.sh                   # Starts both servers
+🌐 backend/api_swagger.py            # API (Port 5000)
+🤖 training/local_model_server.py    # Model (Port 8000)
+```
+
+### Configuration
+```
+🔐 backend/.env                      # All settings
+⚙️ backend/config.py                 # Config loader
+🗄️ backend/database.py               # Database connection
+```
+
+### Tools (Business Logic)
+```
+📂 backend/tools/
+   ├── search_tool.py               # Product search
+   ├── task_tool.py                 # Activity shopping + budget
+   ├── compare_tool.py              # Product comparison
+   ├── alternatives_tool.py         # Similar products
+   └── budget_optimizer.py          # Greedy optimizer (NEW)
+```
+
+### Services (Data Layer)
+```
+📂 backend/services/
+   ├── hybrid_search.py             # SQL + pgvector
+   └── embedding_service.py         # Embeddings
+```
+
+### Data Models
+```
+📂 backend/models/
+   └── schemas.py                   # Pydantic schemas
+```
+
+### Training
+```
+📂 training/
+   ├── train_mlx.py                 # Train Qwen3-4B
+   ├── local_model_server.py        # Inference server
+   ├── data/train.jsonl             # Training data (3166)
+   └── outputs/qwen3_4b_lora_mlx/   # Model weights
+```
+
+## 📖 DOCUMENTATION
+
+```
+README.md                            # Main docs
+QUICK_START.txt                      # Quick guide
+ARCHITECTURE.txt                     # Architecture
+FILE_SCHEMA.txt                      # Full schema (detailed)
+FILE_SCHEMA_QUICK.txt                # This file
+START_NOW.txt                        # Startup guide
+STARTUP_CHECKLIST.txt                # Prerequisites
+```
+
+## 🧪 TESTING
+
+```
+test_new_api.sh                      # Test API
+backend/test_budget_optimizer.py     # Test budget optimizer
+backend/demo_budget_optimizer.py     # Interactive demo
+```
+
+## 🔧 UTILITIES
+
+```
+deploy.sh                            # Deploy to production
+check_environment.py                 # Check setup
+```
+
+## 📊 DATA FLOW
+
+```
+User Query
+   ↓
+api_swagger.py (5000)
+   ↓
+local_model_server.py (8000)
+   ↓
+Tools (search/task/compare/alternatives)
+   ↓
+Services (hybrid_search)
+   ↓
+PostgreSQL + pgvector
+   ↓
+Results
+```
+
+## 🎯 INTENTS
+
+```
+"running shoes under 5000"           → SearchTool
+"I want to start hiking"             → TaskTool → BudgetOptimizer
+"compare MH500 and NH500"            → CompareTool
+"alternatives to MH500"              → AlternativesTool
+```
+
+## 📦 DEPENDENCIES
+
+```
+backend/requirements.txt             # Flask, psycopg2, pydantic
+training/requirements_mlx.txt        # MLX, mlx-lm, FastAPI
+```
+
+## 🔑 KEY ENDPOINTS
+
+```
+POST http://localhost:5000/api/v1/query
+GET  http://localhost:5000/api/v1/system/health
+GET  http://localhost:5000/docs
+
+POST http://localhost:8000/parse-query
+GET  http://localhost:8000/health
+```
+
+## ⚡ CRITICAL FILES (DO NOT DELETE)
+
+```
+✅ start_system.sh
+✅ backend/api_swagger.py
+✅ backend/database.py
+✅ backend/.env
+✅ backend/tools/*.py (all 5)
+✅ backend/services/*.py (both)
+✅ backend/models/schemas.py
+✅ training/local_model_server.py
+✅ training/train_mlx.py
+✅ training/data/*.jsonl
+✅ training/outputs/qwen3_4b_lora_mlx/
+✅ README.md
+```
+
+## 📏 FILE COUNTS
+
+```
+Active Python files:  ~30
+Documentation:        ~15
+Legacy files:         ~25
+Total:               ~70
+```
+
+## 🏃 QUICK COMMANDS
+
+```bash
+# Start system
+./start_system.sh
+
+# Test API
+curl http://localhost:5000/api/v1/system/health
+
+# Query
+curl -X POST http://localhost:5000/api/v1/query \
+  -H "Api-Key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+  -d '{"query":"running shoes under 5000"}'
+
+# Train model
+cd training
+python3 train_mlx.py --mode train --iters 300
+
+# Test budget optimizer
+cd backend
+python3 test_budget_optimizer.py
+```

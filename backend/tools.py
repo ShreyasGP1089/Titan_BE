@@ -4,7 +4,7 @@ These tools interact with PostgreSQL and provide data to the LLM.
 """
 import logging
 from typing import List, Dict, Optional
-from db import execute_query
+from database import execute_query
 from embedding import get_embedding
 from config import DEFAULT_SEARCH_LIMIT
 

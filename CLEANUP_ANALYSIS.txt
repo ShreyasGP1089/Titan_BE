@@ -1,0 +1,260 @@
+PROJECT CLEANUP ANALYSIS
+========================
+
+Date: June 23, 2026
+Analysis: Conservative cleanup for new architecture
+
+## Current Architecture (Active)
+
+User → api_swagger.py (5000) → training/local_model_server.py (8000) → Tools → PostgreSQL
+
+
+## FINDINGS
+
+### 1. DUPLICATE MODEL SERVERS ⚠️
+
+Found TWO local_model_server.py files:
+
+A. **./local_model_server.py** (ROOT - OLD VERSION)
+   - Header: "Local Model Server - Runs on Mac with ngrok"
+   - Model: "Qwen2.5-1.5B-Instruct + LoRA"
+   - Status: OUTDATED (uses old model)
+   
+B. **./training/local_model_server.py** (ACTIVE VERSION)
+   - Header: "Local Model Server - Qwen3-4B Intent Parser"
+   - Model: "Qwen3-4B-Instruct-4bit + LoRA"
+   - Status: CURRENTLY USED by start_system.sh
+   
+Evidence:
+  - start_system.sh line 52: "cd training" then "python3 local_model_server.py"
+  - This proves training/local_model_server.py is the ACTIVE version
+
+Recommendation:
+  ✅ MOVE ./local_model_server.py → backup_old/root_local_model_server_OLD.py
+  ✅ KEEP ./training/local_model_server.py (ACTIVE)
+
+
+### 2. LEGACY API FILES ⚠️
+
+Found in backend/:
+
+A. **backend/api.py** (7159 bytes)
+   - Last modified: Jun 23 12:24
+   - NOT imported anywhere (checked all .py files)
+   - Likely superseded by api_swagger.py
+   
+B. **backend/main.py** (4122 bytes)
+   - Last modified: Jun 23 12:24
+   - NOT imported anywhere
+   - Likely old entry point
+   
+C. **backend/api/agent.py** (exists)
+   - Old unified endpoint
+   - Superseded by api_swagger.py
+   - NOT imported by api_swagger.py
+
+Recommendation:
+  ✅ MOVE backend/api.py → backup_old/backend_api_OLD.py
+  ✅ MOVE backend/main.py → backup_old/backend_main_OLD.py
+  ✅ MOVE backend/api/ → backup_old/backend_api_folder/
+
+
+### 3. LEGACY PLANNER FILES ⚠️
+
+Found in backend/:
+
+A. **backend/hf_planner.py** (12467 bytes)
+   - HuggingFace-based planner
+   - Superseded by training/local_model_server.py
+   
+B. **backend/mlx_planner.py** (14242 bytes)
+   - Old MLX planner
+   - Superseded by training/local_model_server.py
+   
+C. **backend/planner.py** (7735 bytes)
+   - Generic planner
+   - Superseded
+   
+D. **backend/qwen_client.py** (1721 bytes)
+   - Old client
+   - Superseded by LocalModelClient in api_swagger.py
+
+E. **backend/local_model_client.py** (13743 bytes)
+   - Old client implementation
+   - Superseded by LocalModelClient class in api_swagger.py
+
+F. **backend/embedding.py** (1602 bytes)
+   - Check if used by services/embedding_service.py
+
+G. **backend/search_pipeline.py** (16322 bytes)
+   - Old search pipeline
+   - Superseded by tools/search_tool.py + services/hybrid_search.py
+
+H. **backend/tools.py** (5390 bytes)
+   - Old tools module
+   - Superseded by tools/ directory
+
+Recommendation:
+  ✅ CHECK: grep for imports of these files
+  ⚠️  If unused, MOVE to backup_old/
+
+
+### 4. TEST FILES 🔍
+
+Multiple test files exist:
+  - test_agent_api.py
+  - test_api_auth.py
+  - test_base_model.py
+  - test_budget_debug.py (NEW)
+  - test_budget_optimizer.py (NEW)
+  - test_budget_simple.py (NEW)
+  - test_hf_planner.py
+  - test_imports.py
+  - test_llm.py
+  - test_parse_query.py
+  - test_smart_search_api.py
+  - test_smart_search_fixed.py
+  - test_tools.py
+
+Recommendation:
+  ✅ KEEP test_budget_*.py (NEW, actively used)
+  ⚠️  EVALUATE others - may be for legacy code
+
+
+### 5. TRAINING FILES 🔍
+
+Found in training/:
+  - train.py
+  - train_mlx.py (ACTIVE)
+  - train_hf.py
+  - train_simple.py
+
+Recommendation:
+  ✅ KEEP train_mlx.py (ACTIVE for Qwen3-4B)
+  ⚠️  EVALUATE train.py, train_hf.py, train_simple.py
+
+
+### 6. ROOT LEVEL FILES 🔍
+
+Test files in root:
+  - test_both_intents.py
+  - test_chatml_inference.py
+  - test_duplicates.py
+  - test_embeddings.py
+  - test_local_model.py
+  - test_prompt_format.py
+
+Recommendation:
+  ⚠️  Likely for old model testing
+  ⚠️  Check if still relevant
+
+
+## PROPOSED ACTIONS (Requires Your Approval)
+
+### Phase 1: Safe Moves (Duplicates)
+
+```bash
+# Move old root model server
+mv local_model_server.py backup_old/root_local_model_server_OLD.py
+
+# Move legacy API files
+mv backend/api.py backup_old/backend_api_OLD.py
+mv backend/main.py backup_old/backend_main_OLD.py
+mv backend/api/ backup_old/backend_api_folder/
+```
+
+### Phase 2: Check Imports First
+
+Before moving planners and old modules, check:
+```bash
+grep -r "from hf_planner import" backend/
+grep -r "from mlx_planner import" backend/
+grep -r "from planner import" backend/
+grep -r "from qwen_client import" backend/
+grep -r "from local_model_client import" backend/
+grep -r "from embedding import" backend/
+grep -r "from search_pipeline import" backend/
+grep -r "from tools import" backend/
+```
+
+### Phase 3: Move If Unused
+
+If imports not found:
+```bash
+mv backend/hf_planner.py backup_old/
+mv backend/mlx_planner.py backup_old/
+mv backend/planner.py backup_old/
+mv backend/qwen_client.py backup_old/
+mv backend/local_model_client.py backup_old/
+mv backend/search_pipeline.py backup_old/
+mv backend/tools.py backup_old/
+```
+
+### Phase 4: Evaluate Tests
+
+Review each test file to determine if it tests active code.
+
+
+## FILES TO ABSOLUTELY KEEP (Protected)
+
+✅ backend/api_swagger.py - ACTIVE API
+✅ backend/database.py - ACTIVE
+✅ backend/config.py - ACTIVE
+✅ backend/.env - CONFIGURATION
+✅ backend/requirements.txt - ACTIVE
+✅ backend/requirements_render.txt - ACTIVE
+✅ backend/tools/*.py - ALL ACTIVE
+✅ backend/services/*.py - ALL ACTIVE
+✅ backend/models/*.py - ALL ACTIVE
+✅ training/local_model_server.py - ACTIVE MODEL SERVER
+✅ training/train_mlx.py - ACTIVE TRAINING
+✅ training/data/*.jsonl - TRAINING DATA
+✅ training/outputs/ - MODEL WEIGHTS
+✅ training/venv_mlx/ - VIRTUAL ENV
+✅ start_system.sh - ACTIVE STARTUP
+✅ README.md - DOCUMENTATION
+✅ All NEW documentation (.txt files created today)
+
+
+## SAFETY RULES FOLLOWED
+
+✅ NO mass deletion by extension
+✅ NO rm *.txt commands
+✅ NO recursive deletes without approval
+✅ Created backup_old/ directory first
+✅ Moving files, not deleting
+✅ Checking imports before moving
+✅ Asking for approval before any action
+
+
+## NEXT STEPS
+
+Please review this analysis and approve:
+
+1. **Phase 1 actions** (move duplicates) - SAFE
+2. **Phase 2 investigation** (check imports) - SAFE
+3. **Phase 3 actions** (move if unused) - REQUIRES YOUR APPROVAL
+
+After your approval, I will execute the moves to backup_old/.
+
+Files in backup_old/ can be:
+  - Restored if needed
+  - Deleted later after verification
+  - Kept as archive
+
+
+## SUMMARY
+
+Total files identified for potential cleanup:
+  - 1 duplicate model server (root)
+  - 3 legacy API files (api.py, main.py, api/)
+  - 8 legacy planner/client files
+  - ~13 test files (need evaluation)
+  - ~3 old training scripts (need evaluation)
+  - ~6 root test files (need evaluation)
+
+Total: ~34 files
+
+Action: MOVE to backup_old/ (NOT DELETE)
+
+Approval required: YES

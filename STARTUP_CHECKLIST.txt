@@ -1,0 +1,362 @@
+STARTUP CHECKLIST - Before Starting api_swagger.py
+==================================================
+
+## Prerequisites
+
+Before you can start the system, you need:
+
+### 1. ✅ PostgreSQL Database Running
+   - The system needs PostgreSQL with the decathlon_rag database
+   - Check: psql -h localhost -U postgres -d decathlon_rag -c "SELECT 1"
+   
+### 2. ✅ MLX Training Completed (for local_model_server.py)
+   - The SLM (Qwen3-4B) needs to be trained with your data
+   - Or at least have the base model downloaded
+   
+### 3. ✅ Environment Variables Configured
+   - backend/.env file with database credentials
+   - API keys configured
+
+
+## Step-by-Step Startup Guide
+
+### OPTION 1: Start Complete System (Recommended)
+This starts BOTH the model server AND the API.
+
+```bash
+./start_system.sh
+```
+
+This will:
+  1. Check MLX is installed
+  2. Start local_model_server.py (port 8000)
+  3. Wait for model to load (~10 seconds)
+  4. Start api_swagger.py (port 5000)
+  5. Run health checks
+  6. Display test command
+
+**Prerequisites:**
+  - PostgreSQL running
+  - MLX installed (training/venv_mlx)
+  - Model trained OR base model available
+
+
+### OPTION 2: Start Without SLM (Testing Only)
+If you want to test the API without the model server:
+
+```bash
+cd backend
+python3 api_swagger.py
+```
+
+**What will happen:**
+  ✓ API starts on port 5000
+  ✓ Health endpoint works
+  ✓ Swagger UI works (http://localhost:5000/docs)
+  ⚠️  Query endpoint will FAIL (503 Service Unavailable)
+  
+**Error you'll see:**
+  "Cannot connect to model server at http://localhost:8000"
+
+**This is useful for:**
+  - Testing database connectivity
+  - Testing Swagger documentation
+  - Developing without model
+
+
+### OPTION 3: Start API Only (With External Model Server)
+If you have the model server running separately:
+
+Terminal 1 - Model Server:
+```bash
+cd training
+source venv_mlx/bin/activate
+python3 local_model_server.py
+```
+
+Terminal 2 - API:
+```bash
+cd backend
+python3 api_swagger.py
+```
+
+**Full functionality** - API will connect to model server.
+
+
+## Current System Status Check
+
+Run these commands to check if you're ready:
+
+### Check 1: PostgreSQL
+```bash
+psql -h localhost -U postgres -d decathlon_rag -c "\dt"
+```
+Expected: List of tables (products, product_embeddings)
+If fails: Start PostgreSQL or check credentials
+
+### Check 2: MLX Installed
+```bash
+python3 -c "import mlx_lm; print('✅ MLX installed')"
+```
+Expected: ✅ MLX installed
+If fails: Run: cd training && ./setup_mlx.sh
+
+### Check 3: Model Exists
+```bash
+ls -la training/outputs/qwen3_4b_lora_mlx/
+```
+Expected: adapter_config.json, adapters.safetensors
+If fails: Need to train model (see below)
+
+### Check 4: Environment Variables
+```bash
+cat backend/.env | grep -E "POSTGRES|API_KEY|LOCAL_MODEL"
+```
+Expected: All variables set
+If fails: Copy from .env.example and configure
+
+
+## If Model NOT Trained Yet
+
+You have 2 options:
+
+### Option A: Train the Model (Recommended for Production)
+```bash
+cd training
+./setup_mlx.sh              # One-time setup
+source venv_mlx/bin/activate
+python3 train_mlx.py --mode train --iters 300
+```
+Time: ~15 minutes on M1/M2/M3 Mac
+Result: training/outputs/qwen3_4b_lora_mlx/
+
+### Option B: Use Base Model (Quick Test)
+The local_model_server.py will automatically fall back to the base model
+if the adapter is not found. It will work but won't be fine-tuned for
+your specific task.
+
+Just start the server:
+```bash
+cd training
+source venv_mlx/bin/activate
+python3 local_model_server.py
+```
+
+It will warn: "⚠️ Base model loaded (no fine-tuning applied)"
+But it will still work for basic testing.
+
+
+## Quick Start Commands
+
+### If Everything is Ready:
+```bash
+./start_system.sh
+```
+
+### If Model Not Ready, Start API Only:
+```bash
+cd backend
+python3 api_swagger.py
+```
+(API will start but queries will fail without model server)
+
+### To Test API Without Model:
+```bash
+# Terminal 1 - Start API
+cd backend
+python3 api_swagger.py
+
+# Terminal 2 - Test health (should work)
+curl http://localhost:5000/api/v1/system/health
+
+# Terminal 2 - Test query (will fail with 503)
+curl -X POST http://localhost:5000/api/v1/query \
+  -H "Api-Key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"running shoes under 5000"}'
+```
+
+
+## What Happens When You Start api_swagger.py
+
+1. **Initialization**
+   - Loads environment variables
+   - Initializes LocalModelClient (connects to port 8000)
+   - Sets up Flask app
+   - Creates Swagger documentation
+
+2. **On First Request**
+   - Initializes PostgreSQL connection pool
+   - Checks database connectivity
+   - Tries to connect to model server
+   - Logs health status
+
+3. **Query Processing**
+   When you send: POST /api/v1/query
+   
+   Flow:
+   a. Validate API key
+   b. Extract query from request
+   c. Call LocalModelClient.parse(query)
+      → HTTP POST to http://localhost:8000/parse-query
+      → Model server returns: {"intent": "search", ...}
+   d. Route to appropriate tool (SearchTool, TaskTool, etc.)
+   e. Execute tool (queries PostgreSQL)
+   f. Return results
+
+4. **If Model Server Not Running**
+   - Step (c) will fail
+   - Returns 503 Service Unavailable
+   - Error: "Cannot connect to model server"
+
+
+## Testing Endpoints
+
+### 1. Health Check (No Model Required)
+```bash
+curl http://localhost:5000/api/v1/system/health
+```
+
+Expected Response:
+```json
+{
+  "status": "degraded",
+  "api": "running",
+  "model_server": "disconnected",
+  "database": "connected"
+}
+```
+
+### 2. Swagger UI (No Model Required)
+Open browser:
+```
+http://localhost:5000/docs
+```
+
+### 3. Query Endpoint (Requires Model Server)
+```bash
+curl -X POST http://localhost:5000/api/v1/query \
+  -H "Api-Key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"running shoes under 5000"}'
+```
+
+Expected Response (if model server running):
+```json
+{
+  "type": "search",
+  "products": [...],
+  "total": 10,
+  "query": "running shoes under 5000"
+}
+```
+
+Expected Error (if model server NOT running):
+```json
+{
+  "error": "Service Unavailable",
+  "message": "Cannot connect to model server at http://localhost:8000. Is local_model_server.py running?"
+}
+```
+
+
+## Troubleshooting
+
+### Problem: "Cannot connect to model server"
+Solution: Start the model server first
+```bash
+cd training
+source venv_mlx/bin/activate
+python3 local_model_server.py
+```
+
+### Problem: "Database connection failed"
+Solution: Start PostgreSQL
+```bash
+# macOS with Homebrew
+brew services start postgresql
+
+# Or check if running
+psql -h localhost -U postgres -l
+```
+
+### Problem: "mlx_lm not found"
+Solution: Install MLX
+```bash
+cd training
+./setup_mlx.sh
+source venv_mlx/bin/activate
+```
+
+### Problem: "Model not found"
+Solution: Either train model or let it use base model
+```bash
+# Option A: Train
+cd training
+python3 train_mlx.py --mode train --iters 300
+
+# Option B: Use base model (no action needed, will auto-download)
+```
+
+### Problem: Port 5000 or 8000 already in use
+Solution: Kill existing process
+```bash
+lsof -ti:5000 | xargs kill
+lsof -ti:8000 | xargs kill
+```
+
+
+## Recommended Startup Order
+
+For full functionality:
+
+1. **Start PostgreSQL** (if not running)
+2. **Start model server** (Terminal 1)
+   ```bash
+   cd training
+   source venv_mlx/bin/activate
+   python3 local_model_server.py
+   ```
+   Wait for: "✓ Model loaded successfully"
+
+3. **Start API** (Terminal 2)
+   ```bash
+   cd backend
+   python3 api_swagger.py
+   ```
+   Wait for: "✅ API READY"
+
+4. **Test** (Terminal 3)
+   ```bash
+   curl http://localhost:5000/api/v1/system/health
+   ```
+
+Or just use:
+```bash
+./start_system.sh
+```
+(Does all of the above automatically)
+
+
+## Summary
+
+**YES**, you can start api_swagger.py now, but:
+
+✅ It will START successfully
+✅ Health endpoint will work
+✅ Swagger UI will work
+✅ Database queries will work (if PostgreSQL running)
+
+❌ Query endpoint will FAIL without model server
+❌ You'll get "Cannot connect to model server" errors
+
+**Recommendation:**
+Use `./start_system.sh` to start BOTH servers together.
+
+If you just want to test the API structure without queries:
+```bash
+cd backend
+python3 api_swagger.py
+```
+
+Then open: http://localhost:5000/docs

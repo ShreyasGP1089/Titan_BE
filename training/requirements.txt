@@ -1,4 +1,4 @@
-# Fine-tuning requirements for Qwen3-4B Search Planner
+# Training requirements for HuggingFace/PyTorch
 
 # Core ML Libraries
 transformers>=4.51.0
@@ -6,19 +6,15 @@ datasets>=2.18.0
 peft>=0.10.0
 accelerate>=0.27.2
 safetensors>=0.4.2
-bitsandbytes>=0.43.0
 
 # PyTorch
 torch>=2.1.0
-torchvision>=0.16.0
 
 # Data Processing
 pandas>=2.0.0
 openpyxl>=3.1.0
+numpy>=1.24.0
 
 # Utilities
-numpy>=1.24.0
 tqdm>=4.65.0
-
-# Optional: Weights & Biases for experiment tracking
-# wandb>=0.15.0
+python-dotenv>=1.0.0

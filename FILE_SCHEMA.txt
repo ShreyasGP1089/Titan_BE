@@ -1,0 +1,446 @@
+DECATHLON SMART SHOPPING API - FILE SCHEMA
+===========================================
+
+## Project Root Structure
+
+```
+Toolset/
+│
+├── 📂 backend/                      # Main API application
+├── 📂 training/                     # Model training & inference
+├── 📂 scripts/                      # Utility scripts (empty)
+├── 📂 backup_old/                   # Backup for cleanup
+│
+├── 🚀 start_system.sh              # Start both servers (MAIN ENTRY)
+├── 📖 README.md                     # Project documentation
+├── 📄 requirements.txt              # Root dependencies
+│
+├── 📋 ARCHITECTURE.txt              # Architecture documentation
+├── 📋 QUICK_START.txt               # Quick start guide
+├── 📋 REFACTORING_COMPLETE.txt      # Refactoring summary
+├── 📋 IMPLEMENTATION_SUMMARY.txt    # Implementation overview
+├── 📋 BUDGET_OPTIMIZER_IMPLEMENTATION.txt
+├── 📋 CLEANUP_ANALYSIS.txt          # Cleanup analysis
+├── 📋 CLEANUP_RECOMMENDATIONS.txt   # Cleanup recommendations
+├── 📋 CLEANUP_SUMMARY.txt           # Cleanup summary
+├── 📋 STARTUP_CHECKLIST.txt         # Startup prerequisites
+├── 📋 START_NOW.txt                 # Quick start guide
+├── 📋 CHATML_FIX.txt                # ChatML prompt fix details
+├── 📋 FILE_SCHEMA.txt               # This file
+│
+├── 🧪 test_new_api.sh              # API test script
+├── 🔧 check_environment.py          # Environment checker
+├── 🔧 deploy.sh                     # Deployment script
+├── 🔧 docker-compose.yml            # Docker configuration
+├── 🔧 Dockerfile                    # Docker image
+├── 🔧 fix_local_env.sh              # Environment fix script
+├── 🔧 quick_verify.sh               # Quick verification
+├── 🔧 verify_production_ready.sh    # Production readiness check
+│
+├── 🧪 test_*.py                     # Various test files (legacy)
+└── 📂 __pycache__/                  # Python cache
+```
+
+
+## Backend Structure (Active API)
+
+```
+backend/
+│
+├── 🚀 api_swagger.py               # MAIN API - Single entry point
+│   ├─→ LocalModelClient            # Connects to model server
+│   ├─→ SearchTool, TaskTool        # Routes to tools
+│   ├─→ CompareTool, AlternativesTool
+│   └─→ Swagger documentation
+│
+├── 🗄️ database.py                  # PostgreSQL connection pool
+│   ├─→ initialize_pool()
+│   ├─→ connect_db()
+│   ├─→ release_connection()
+│   └─→ execute_query()
+│
+├── ⚙️ config.py                    # Environment configuration
+│   └─→ Loads from .env
+│
+├── 🔐 .env                         # Environment variables
+│   ├─→ POSTGRES_* (database config)
+│   ├─→ API_KEY (authentication)
+│   └─→ LOCAL_MODEL_URL (model server)
+│
+├── 📋 requirements.txt             # Python dependencies
+├── 📋 requirements_render.txt      # Render deployment deps
+├── 📋 requirements_production.txt  # Production deps
+│
+├── 📂 tools/                       # Business logic tools
+│   ├── 🔍 search_tool.py          # Product search
+│   ├── 📦 task_tool.py            # Activity-based shopping
+│   ├── 🔄 compare_tool.py         # Product comparison
+│   ├── 🔀 alternatives_tool.py    # Similar products
+│   └── 💰 budget_optimizer.py     # Greedy budget optimizer
+│
+├── 📂 services/                    # Data services
+│   ├── 🔎 hybrid_search.py        # SQL + pgvector search
+│   └── 🧠 embedding_service.py    # Semantic embeddings
+│
+├── 📂 models/                      # Data schemas
+│   └── 📐 schemas.py              # Pydantic models
+│       ├─→ SearchRequest, TaskArguments
+│       ├─→ Product, TaskItem
+│       └─→ SearchResponse, TaskResponse
+│
+├── 📂 db/                          # Database utilities
+│   ├── __init__.py
+│   └── queries.py
+│
+├── 📂 api/                         # Old API (legacy)
+│   └── agent.py                   # Superseded by api_swagger.py
+│
+├── 🧪 test_budget_optimizer.py    # Budget optimizer tests (NEW)
+├── 🧪 test_budget_debug.py        # Debug tests (NEW)
+├── 🧪 test_budget_simple.py       # Simple tests (NEW)
+├── 🧪 demo_budget_optimizer.py    # Demo script (NEW)
+├── 📋 BUDGET_OPTIMIZER.txt        # Algorithm docs (NEW)
+│
+├── 📜 embedding.py                # Embedding utilities (ACTIVE)
+│   └─→ Used by services/embedding_service.py
+│
+└── 📜 Legacy files (unused by api_swagger.py):
+    ├── api.py                     # Old API
+    ├── main.py                    # Old entry point
+    ├── hf_planner.py              # HuggingFace planner
+    ├── mlx_planner.py             # MLX planner
+    ├── planner.py                 # Generic planner
+    ├── qwen_client.py             # Old client
+    ├── local_model_client.py      # Old client
+    ├── search_pipeline.py         # Old search
+    ├── tools.py                   # Old tools
+    └── test_*.py                  # Various test files
+```
+
+
+## Training Structure (Model Training & Inference)
+
+```
+training/
+│
+├── 🤖 local_model_server.py       # ACTIVE MODEL SERVER (Port 8000)
+│   ├─→ FastAPI application
+│   ├─→ Loads Qwen3-4B + LoRA adapter
+│   ├─→ POST /parse-query (intent parsing)
+│   ├─→ GET /health (health check)
+│   └─→ ChatML format prompts (FIXED)
+│
+├── 🎓 train_mlx.py                # ACTIVE MLX training script
+│   ├─→ Trains Qwen3-4B with LoRA
+│   ├─→ Uses Apple Silicon (MPS)
+│   ├─→ --mode train/test
+│   └─→ Saves to outputs/
+│
+├── 📂 data/                       # Training data
+│   ├── 📄 train.jsonl            # 3166 training examples
+│   ├── 📄 valid.jsonl            # Validation set
+│   └── 📄 test.jsonl             # Test set
+│       └─→ ChatML format:
+│           <|im_start|>system...
+│           <|im_start|>user...
+│           <|im_start|>assistant...
+│
+├── 📂 outputs/                    # Model weights
+│   └── 📂 qwen3_4b_lora_mlx/     # Fine-tuned adapter
+│       ├── adapter_config.json
+│       ├── adapters.safetensors
+│       ├── 0000100_adapters.safetensors
+│       ├── 0000200_adapters.safetensors
+│       └── 0000300_adapters.safetensors
+│
+├── 📂 venv_mlx/                   # Virtual environment
+│   └─→ MLX, mlx-lm, FastAPI, etc.
+│
+├── 📋 requirements.txt            # Training dependencies
+├── 📋 requirements_mlx.txt        # MLX-specific deps
+│
+├── 🔧 setup_mlx.sh                # MLX setup script
+│
+└── 📜 Legacy training scripts:
+    ├── train.py                   # Old training
+    ├── train_hf.py                # HuggingFace training
+    └── train_simple.py            # Simple training
+```
+
+
+## Data Flow Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ USER                                                         │
+│ "I want to start hiking under 10000"                        │
+└────────────────────────┬────────────────────────────────────┘
+                         │
+                         │ POST /api/v1/query
+                         │ {"query": "..."}
+                         ▼
+┌─────────────────────────────────────────────────────────────┐
+│ backend/api_swagger.py (Port 5000)                          │
+│ ├─ Authenticate API key                                     │
+│ ├─ LocalModelClient.parse(query)                           │
+│ └─ Route by intent                                          │
+└────────────────────────┬────────────────────────────────────┘
+                         │
+                         │ POST /parse-query
+                         │ {"query": "..."}
+                         ▼
+┌─────────────────────────────────────────────────────────────┐
+│ training/local_model_server.py (Port 8000)                  │
+│ ├─ Build ChatML prompt                                      │
+│ ├─ Generate with Qwen3-4B + LoRA                           │
+│ └─ Return structured JSON                                   │
+└────────────────────────┬────────────────────────────────────┘
+                         │
+                         │ {"intent":"task","arguments":{...}}
+                         ▼
+┌─────────────────────────────────────────────────────────────┐
+│ backend/tools/task_tool.py                                  │
+│ ├─ Search products for each item                           │
+│ └─ Call BudgetOptimizer                                     │
+└────────────────────────┬────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────┐
+│ backend/tools/budget_optimizer.py                           │
+│ ├─ Score all products                                       │
+│ ├─ Select mandatory items (with lookahead)                 │
+│ ├─ Add optional items (by utility)                         │
+│ └─ Return optimized kit                                     │
+└────────────────────────┬────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────┐
+│ backend/services/hybrid_search.py                           │
+│ ├─ SQL filtering (sport, category, price)                  │
+│ ├─ Semantic search (pgvector)                              │
+│ └─ Return ranked products                                   │
+└────────────────────────┬────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────┐
+│ PostgreSQL + pgvector                                        │
+│ ├─ products table                                           │
+│ └─ product_embeddings table                                 │
+└────────────────────────┬────────────────────────────────────┘
+                         │
+                         │ Results
+                         ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Response to User                                             │
+│ {                                                            │
+│   "activity": "Hiking",                                      │
+│   "total_cost": 9500,                                        │
+│   "items": [...]                                             │
+│ }                                                            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+
+## Key File Relationships
+
+### Active System (Current Architecture)
+
+```
+start_system.sh
+├─→ training/local_model_server.py (Port 8000)
+│   ├─→ training/outputs/qwen3_4b_lora_mlx/ (model weights)
+│   └─→ training/data/*.jsonl (training data reference)
+│
+└─→ backend/api_swagger.py (Port 5000)
+    ├─→ backend/.env (configuration)
+    ├─→ backend/database.py (DB connection)
+    │   └─→ PostgreSQL
+    │
+    ├─→ backend/tools/search_tool.py
+    │   └─→ backend/services/hybrid_search.py
+    │       ├─→ backend/services/embedding_service.py
+    │       │   └─→ backend/embedding.py
+    │       └─→ backend/database.py
+    │
+    ├─→ backend/tools/task_tool.py
+    │   └─→ backend/tools/budget_optimizer.py
+    │       └─→ backend/services/hybrid_search.py
+    │
+    ├─→ backend/tools/compare_tool.py
+    │   └─→ backend/database.py
+    │
+    └─→ backend/tools/alternatives_tool.py
+        └─→ backend/database.py
+```
+
+
+## Intent Routing
+
+```
+Query → api_swagger.py → Intent Router
+                            ├─ "search" → SearchTool
+                            ├─ "task" → TaskTool → BudgetOptimizer
+                            ├─ "compare" → CompareTool
+                            └─ "alternatives" → AlternativesTool
+```
+
+
+## Configuration Files
+
+```
+backend/.env                    # Active configuration
+├─ POSTGRES_HOST=localhost
+├─ POSTGRES_PORT=5432
+├─ POSTGRES_DB=decathlon_rag
+├─ POSTGRES_USER=postgres
+├─ POSTGRES_PASSWORD=***
+├─ API_KEY=decathlon_smart_search_2024_secure_key_abc123xyz
+└─ LOCAL_MODEL_URL=http://localhost:8000
+
+backend/.env.example           # Template
+backend/.env.production.example # Production template
+```
+
+
+## Documentation Files
+
+```
+Root Documentation:
+├─ README.md                          # Main documentation
+├─ ARCHITECTURE.txt                   # Architecture details
+├─ QUICK_START.txt                    # Quick start guide
+├─ STARTUP_CHECKLIST.txt              # Prerequisites
+├─ START_NOW.txt                      # Quick commands
+├─ IMPLEMENTATION_SUMMARY.txt         # Overall summary
+├─ REFACTORING_COMPLETE.txt           # Refactoring details
+├─ BUDGET_OPTIMIZER_IMPLEMENTATION.txt # Budget optimizer
+├─ CHATML_FIX.txt                     # ChatML fix details
+├─ CLEANUP_ANALYSIS.txt               # Cleanup findings
+├─ CLEANUP_RECOMMENDATIONS.txt        # Cleanup plan
+└─ FILE_SCHEMA.txt                    # This file
+
+Backend Documentation:
+└─ backend/BUDGET_OPTIMIZER.txt       # Algorithm details
+```
+
+
+## Test Files
+
+```
+Active Tests:
+├─ backend/test_budget_optimizer.py   # Budget optimizer suite
+├─ backend/test_budget_debug.py       # Debug tests
+├─ backend/test_budget_simple.py      # Simple tests
+└─ backend/demo_budget_optimizer.py   # Interactive demo
+
+Test Scripts:
+└─ test_new_api.sh                    # API test script
+
+Legacy Tests (may be outdated):
+├─ backend/test_agent_api.py
+├─ backend/test_api_auth.py
+├─ backend/test_tools.py
+└─ test_*.py (root level)
+```
+
+
+## File Size Summary
+
+```
+Category              Count    Total Size
+────────────────────  ─────    ──────────
+Python (.py)          ~60      ~500 KB
+Documentation (.txt)  ~15      ~200 KB
+Data (.jsonl)         3        ~10 MB
+Model weights         4        ~120 MB
+Scripts (.sh)         ~10      ~50 KB
+Config (.env, .json)  ~5       ~10 KB
+```
+
+
+## Critical Files (DO NOT DELETE)
+
+```
+✅ MUST KEEP:
+   - start_system.sh
+   - backend/api_swagger.py
+   - backend/database.py
+   - backend/config.py
+   - backend/.env
+   - backend/embedding.py (used by services/)
+   - backend/tools/*.py (all 5 files)
+   - backend/services/*.py (both files)
+   - backend/models/schemas.py
+   - backend/requirements*.txt
+   - training/local_model_server.py
+   - training/train_mlx.py
+   - training/data/*.jsonl
+   - training/outputs/qwen3_4b_lora_mlx/
+   - training/venv_mlx/
+   - README.md
+```
+
+
+## Startup Files Priority
+
+```
+1. start_system.sh               # Primary startup script
+2. training/local_model_server.py # Model inference
+3. backend/api_swagger.py         # Main API
+4. backend/database.py            # DB connection
+5. backend/.env                   # Configuration
+```
+
+
+## Model Training Flow
+
+```
+1. training/data/train.jsonl     # Training data (3166 examples)
+   ↓
+2. training/train_mlx.py         # Training script
+   ↓
+3. training/outputs/             # Saves adapter weights
+   qwen3_4b_lora_mlx/
+   ↓
+4. training/local_model_server.py # Loads for inference
+   ↓
+5. Model ready for queries
+```
+
+
+## Environment Setup
+
+```
+1. PostgreSQL                    # Database
+   └─ decathlon_rag database
+      ├─ products table
+      └─ product_embeddings table
+
+2. Python Environment
+   ├─ training/venv_mlx/         # MLX environment
+   │  └─ MLX, mlx-lm, FastAPI
+   └─ backend/                   # Backend env (optional separate)
+      └─ Flask, psycopg2, etc.
+
+3. Configuration
+   └─ backend/.env               # All settings
+```
+
+
+## Summary
+
+**Total Structure:**
+- 2 main applications (API + Model Server)
+- 5 tools (search, task, compare, alternatives, budget optimizer)
+- 2 services (hybrid search, embedding)
+- 1 model (Qwen3-4B + LoRA)
+- 1 database (PostgreSQL + pgvector)
+
+**Active Files:** ~30 core files
+**Documentation:** ~15 files
+**Legacy Files:** ~25 files (candidates for cleanup)
+
+**Entry Point:** `./start_system.sh`
+**API:** `http://localhost:5000/api/v1/query`
+**Model:** `http://localhost:8000/parse-query`
+**Docs:** `http://localhost:5000/docs` (Swagger)

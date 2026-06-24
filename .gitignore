@@ -118,49 +118,12 @@ backend/*_test.py
 backend/test_base_model.py
 
 # ============================================================================
-# Documentation (Redundant/Internal)
+# Documentation (All Markdown Files)
 # ============================================================================
-# Keep essential deployment docs, ignore redundant/outdated ones
-
-# Old internal development docs (outdated)
-CLEANUP_SUMMARY.md
-IMPLEMENTATION_COMPLETE.txt
-REFACTORING_COMPLETE.md
-MIGRATION_SUMMARY.md
-DOCUMENTATION_INDEX.md
-
-# Redundant/old deployment guides (we have better ones now)
-DEPLOYMENT_README.md
-PRODUCTION_DEPLOYMENT.md
-PRODUCTION_READY.md
-READY_TO_DEPLOY.txt
-DEPLOYMENT_QUICK_REFERENCE.md
-RENDER_DEPLOY_FIXES.md
-DEPLOYMENT_FILES.md
-
-# Backend redundant docs (covered by main docs)
-backend/QUICKSTART.md
-backend/SETUP.md
-backend/SUCCESS_GUIDE.md
-backend/SWAGGER_GUIDE.md
-backend/SWAGGER_QUICKSTART.txt
-backend/VISUAL_GUIDE.md
-backend/CONNECTION_TROUBLESHOOTING.md
-backend/DEPLOYMENT.md
-
-# API guides (redundant with Swagger /docs)
-API_GUIDE.md
-backend/OPENAPI_CONFIG.json
-
-# KEEP THESE NEW DOCS (essential for deployment):
-# - FINAL_SUMMARY.md
-# - DEPLOY_CHECKLIST.md
-# - DEPLOYMENT_STATUS.md
-# - CHANGES_SUMMARY.md
-# - QUICK_REFERENCE.md
-# - verify_deployment_ready.sh
-# - README.md
-# - DEPLOYMENT_ARCHITECTURE.md
+# Ignore ALL .md files - documentation no longer maintained as markdown
+*.md
+backend/*.md
+training/*.md
 
 # ============================================================================
 # Scripts (Development/Testing Only)
@@ -186,7 +149,6 @@ backend/example_client.html
 
 # Training scripts
 training/*.py
-training/*.md
 training/*.txt
 training/*.json
 !training/__init__.py

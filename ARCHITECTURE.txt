@@ -1,0 +1,288 @@
+DECATHLON SMART SHOPPING API - ARCHITECTURE
+===========================================
+
+## Overview
+
+Single unified API that accepts natural language queries and returns structured results.
+
+## Architecture Flow
+
+┌─────────────────────────────────────────────────────────────────┐
+│ USER                                                             │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+                            │ Natural Language Query
+                            │ "running shoes under 5000"
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ API_SWAGGER.PY (Flask + Flask-RESTX)                            │
+│ Port: 5000                                                       │
+│ Endpoint: POST /api/v1/query                                    │
+│                                                                  │
+│ - Receives natural language query                               │
+│ - Authenticates API key                                         │
+│ - Calls LocalModelClient                                        │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+                            │ HTTP POST /parse-query
+                            │ {"query": "..."}
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ LOCAL_MODEL_SERVER.PY (FastAPI)                                 │
+│ Port: 8000                                                       │
+│ Model: Qwen3-4B-Instruct-4bit + LoRA                           │
+│                                                                  │
+│ - Loads fine-tuned model                                        │
+│ - Parses natural language                                       │
+│ - Returns structured JSON                                       │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+                            │ Structured JSON Response
+                            │ {"intent": "search", ...}
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ ROUTING LOGIC (in api_swagger.py)                               │
+│                                                                  │
+│ Intent Router:                                                   │
+│   - search      → SearchTool                                    │
+│   - task        → TaskTool                                      │
+│   - compare     → CompareTool                                   │
+│   - alternatives → AlternativesTool                             │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+        ┌───────────────────┼───────────────────┐
+        │                   │                   │
+        ▼                   ▼                   ▼
+┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+│ SearchTool   │   │ TaskTool     │   │ CompareTool  │
+│              │   │              │   │              │
+│ - Filters    │   │ - Activity   │   │ - Multi-     │
+│ - Keywords   │   │   groups     │   │   product    │
+│ - Price      │   │ - Budget     │   │   fetch      │
+│ - pgvector   │   │   optimizer  │   │              │
+└──────┬───────┘   └──────┬───────┘   └──────┬───────┘
+       │                  │                  │
+       └──────────────────┼──────────────────┘
+                          │
+                          ▼
+        ┌─────────────────────────────────────┐
+        │ HybridSearchService                  │
+        │                                      │
+        │ - SQL filtering                      │
+        │ - Semantic search (pgvector)        │
+        │ - Keyword matching                   │
+        └─────────────┬────────────────────────┘
+                      │
+                      ▼
+        ┌─────────────────────────────────────┐
+        │ PostgreSQL + pgvector                │
+        │                                      │
+        │ Tables:                              │
+        │   - products                         │
+        │   - product_embeddings               │
+        └─────────────┬────────────────────────┘
+                      │
+                      │ Results
+                      │
+                      ▼
+        ┌─────────────────────────────────────┐
+        │ Response Builder                     │
+        │                                      │
+        │ - Converts to Pydantic schemas       │
+        │ - Adds metadata                      │
+        │ - Returns JSON                       │
+        └─────────────┬────────────────────────┘
+                      │
+                      │ Final Response
+                      │
+                      ▼
+                    USER
+
+
+## Key Components
+
+### 1. api_swagger.py
+- **Role**: Single public API
+- **Tech**: Flask + Flask-RESTX
+- **Port**: 5000
+- **Key Classes**:
+  - LocalModelClient: Communicates with model server
+  - Tool instances: SearchTool, TaskTool, CompareTool, AlternativesTool
+
+### 2. local_model_server.py
+- **Role**: Intent parser (NLU)
+- **Tech**: FastAPI + MLX-LM
+- **Port**: 8000
+- **Model**: Qwen3-4B-Instruct-4bit + LoRA adapter
+- **Endpoints**:
+  - POST /parse-query: Parse query → JSON
+  - GET /health: Health check
+
+### 3. Tools (backend/tools/)
+- **SearchTool**: Product search with filters
+- **TaskTool**: Activity-based shopping (e.g., "start playing golf")
+- **CompareTool**: Fetch multiple products for comparison
+- **AlternativesTool**: Find similar products
+
+### 4. Services (backend/services/)
+- **HybridSearchService**: Combines SQL filtering + semantic search
+- **EmbeddingService**: Generate embeddings for semantic search
+
+### 5. Database (backend/database.py)
+- Connection pooling
+- PostgreSQL + pgvector extension
+
+
+## Intent Types
+
+### 1. SEARCH
+**User Query**: "running shoes under 5000"
+**Parsed JSON**:
+{
+  "intent": "search",
+  "search_request": {
+    "sport": "Running",
+    "category_level_1": "Footwear",
+    "keywords": ["running", "shoes"],
+    "price_limit": 5000
+  }
+}
+
+### 2. TASK
+**User Query**: "I want to start playing golf"
+**Parsed JSON**:
+{
+  "intent": "task",
+  "arguments": {
+    "activity": "Golf",
+    "budget": null
+  }
+}
+
+### 3. COMPARE
+**User Query**: "compare MH500 and NH500"
+**Parsed JSON**:
+{
+  "intent": "compare",
+  "arguments": {
+    "products": ["MH500", "NH500"]
+  }
+}
+
+### 4. ALTERNATIVES
+**User Query**: "alternatives to MH500"
+**Parsed JSON**:
+{
+  "intent": "alternatives",
+  "arguments": {
+    "product": "MH500"
+  }
+}
+
+
+## Deployment Options
+
+### Option 1: Single Mac Server (Development)
+- Run both api_swagger.py and local_model_server.py on same machine
+- Use: ./start_system.sh
+- RAM: ~2.2 GB total
+
+### Option 2: Split Deployment (Production)
+- Render: api_swagger.py (~200 MB RAM)
+- Mac: local_model_server.py (~2 GB RAM)
+- Connect via ngrok: https://xxx.ngrok.io
+- Set LOCAL_MODEL_URL=https://xxx.ngrok.io in Render
+
+
+## Training Pipeline
+
+1. Prepare data: training/data/train.jsonl (ChatML format)
+2. Fine-tune: python3 train_mlx.py --mode train --iters 300
+3. Output: training/outputs/qwen3_4b_lora_mlx/
+4. Test: python3 train_mlx.py --mode test
+5. Deploy: local_model_server.py loads adapter automatically
+
+
+## File Structure
+
+backend/
+├── api_swagger.py          # Single public API (ENTRY POINT)
+├── database.py             # Connection pool
+├── config.py               # Environment config
+├── .env                    # Environment variables
+├── tools/
+│   ├── search_tool.py
+│   ├── task_tool.py
+│   ├── compare_tool.py
+│   ├── alternatives_tool.py
+│   └── budget_optimizer.py
+├── services/
+│   ├── hybrid_search.py
+│   └── embedding_service.py
+├── models/
+│   └── schemas.py          # Pydantic schemas
+└── db/
+    └── queries.py
+
+training/
+├── local_model_server.py   # Model server (ENTRY POINT)
+├── train_mlx.py            # Training script
+├── data/
+│   ├── train.jsonl
+│   ├── valid.jsonl
+│   └── test.jsonl
+└── outputs/
+    └── qwen3_4b_lora_mlx/  # Fine-tuned adapter
+
+
+## API Usage Examples
+
+### Health Check
+curl http://localhost:5000/api/v1/system/health
+
+### Search Query
+curl -X POST http://localhost:5000/api/v1/query \
+  -H "Api-Key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"running shoes under 5000"}'
+
+### Task Query
+curl -X POST http://localhost:5000/api/v1/query \
+  -H "Api-Key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"golf equipment under 15000"}'
+
+### Swagger UI
+http://localhost:5000/docs
+
+
+## Environment Variables
+
+### Backend (.env)
+API_KEY=decathlon_smart_search_2024_secure_key_abc123xyz
+LOCAL_MODEL_URL=http://localhost:8000
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=decathlon_rag
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=your_password
+
+### Model Server
+MODEL_SERVER_PORT=8000 (default)
+
+
+## Key Design Decisions
+
+1. **Single Public API**: Only api_swagger.py is exposed to users
+2. **Separation of Concerns**: 
+   - api_swagger.py: Routing, authentication, orchestration
+   - local_model_server.py: NLU, intent parsing
+   - tools/: Business logic, data retrieval
+3. **Stateless**: No session management, every request is independent
+4. **Modular**: Tools are independent, can be tested separately
+5. **Type-Safe**: Pydantic schemas for validation
+6. **Documented**: Swagger UI for API exploration
+7. **Production-Ready**: Connection pooling, error handling, logging

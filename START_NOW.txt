@@ -1,0 +1,215 @@
+START THE SYSTEM NOW - Quick Guide
+===================================
+
+## Your System Status
+
+✅ Model TRAINED: training/outputs/qwen3_4b_lora_mlx/ exists
+✅ MLX installed: training/venv_mlx/ exists
+⚠️  Database: Need to verify (will check on startup)
+
+## FASTEST WAY TO START
+
+Open a terminal and run:
+
+```bash
+cd "/Users/shreyasgpalimar/Downloads/Code Base/Toolset"
+./start_system.sh
+```
+
+This will:
+1. Start local_model_server.py (port 8000) with your trained model
+2. Start api_swagger.py (port 5000)
+3. Run health checks
+4. Give you a test command
+
+**Time:** ~15 seconds for both to start
+
+
+## What You'll See
+
+```
+=========================================
+Starting Decathlon Smart Shopping System
+=========================================
+
+Architecture:
+  User → api_swagger.py (port 5000)
+        ↓
+  local_model_server.py (port 8000)
+        ↓
+  Qwen3-4B + LoRA → Tools → PostgreSQL
+
+...
+
+✅ SYSTEM READY
+
+API Endpoints:
+  POST http://localhost:5000/api/v1/query
+  GET  http://localhost:5000/api/v1/system/health
+  GET  http://localhost:5000/docs (Swagger)
+
+Test command:
+  curl -X POST http://localhost:5000/api/v1/query \
+       -H 'Api-Key: decathlon_smart_search_2024_secure_key_abc123xyz' \
+       -H 'Content-Type: application/json' \
+       -d '{"query":"running shoes under 5000"}'
+```
+
+
+## If You Get Errors
+
+### Error: "Cannot connect to database"
+Your PostgreSQL might not be running or credentials wrong.
+
+Check backend/.env:
+```bash
+cat backend/.env | grep POSTGRES
+```
+
+Should see:
+```
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=decathlon_rag
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=test
+```
+
+If password is wrong, update it in backend/.env
+
+
+### Error: "mlx_lm not found"
+Run:
+```bash
+cd training
+source venv_mlx/bin/activate
+cd ..
+./start_system.sh
+```
+
+
+### Error: "Port already in use"
+Kill existing processes:
+```bash
+lsof -ti:5000 | xargs kill
+lsof -ti:8000 | xargs kill
+./start_system.sh
+```
+
+
+## Alternative: Start Manually
+
+If start_system.sh doesn't work, start each component separately:
+
+**Terminal 1 - Model Server:**
+```bash
+cd "/Users/shreyasgpalimar/Downloads/Code Base/Toolset/training"
+source venv_mlx/bin/activate
+python3 local_model_server.py
+```
+Wait for: "✓ Model loaded successfully"
+
+**Terminal 2 - API:**
+```bash
+cd "/Users/shreyasgpalimar/Downloads/Code Base/Toolset/backend"
+python3 api_swagger.py
+```
+Wait for: "✅ API READY"
+
+**Terminal 3 - Test:**
+```bash
+curl http://localhost:5000/api/v1/system/health
+```
+
+
+## Test Queries
+
+Once system is running:
+
+### 1. Health Check
+```bash
+curl http://localhost:5000/api/v1/system/health
+```
+
+### 2. Search Query
+```bash
+curl -X POST http://localhost:5000/api/v1/query \
+  -H "Api-Key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"running shoes under 5000"}'
+```
+
+### 3. Task with Budget
+```bash
+curl -X POST http://localhost:5000/api/v1/query \
+  -H "Api-Key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"I want to start hiking under 10000"}'
+```
+
+### 4. Swagger UI
+Open browser:
+```
+http://localhost:5000/docs
+```
+
+
+## Expected Flow
+
+1. You send query: "running shoes under 5000"
+2. api_swagger.py receives it
+3. Calls local_model_server.py on port 8000
+4. Model returns: {"intent":"search","search_request":{...}}
+5. api_swagger.py routes to SearchTool
+6. SearchTool queries PostgreSQL
+7. Returns products to you
+
+
+## YES, YOU CAN START NOW!
+
+Just run:
+```bash
+./start_system.sh
+```
+
+The system will:
+✅ Check all prerequisites
+✅ Start both servers
+✅ Show you test commands
+✅ Keep running until you press Ctrl+C
+
+
+## If Database Not Set Up
+
+If you don't have the PostgreSQL database ready yet:
+
+**Option 1:** Start API only (will fail on queries but structure works)
+```bash
+cd backend
+python3 api_swagger.py
+```
+Then visit: http://localhost:5000/docs
+
+**Option 2:** Set up database first
+(You'll need to load products data into PostgreSQL)
+
+
+## Summary
+
+**Can you start api_swagger.py?**
+✅ YES
+
+**Will it connect to SLM?**
+✅ YES - if you also start local_model_server.py
+❌ NO - if you only start api_swagger.py
+
+**Will it give responses?**
+✅ YES - if both servers running + database accessible
+⚠️  PARTIAL - if database not set up (will get empty results)
+
+**Recommended:**
+```bash
+./start_system.sh
+```
+
+This ensures everything starts correctly! 🚀
