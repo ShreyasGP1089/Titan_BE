@@ -73,7 +73,8 @@ class HybridSearchService:
         'jersey', 'jerseys', 'shirt', 'shirts', 'short', 'shorts', 'jacket', 'jackets',
         'socks', 'sock', 'trouser', 'trousers', 'cap', 'caps', 'goggle', 'goggles',
         'swimsuit', 'swimsuits', 'helmet', 'helmets', 'racket', 'rackets', 'cone', 'cones',
-        'marker', 'markers', 'saucer', 'saucers', 'needle', 'needles', 'referee'
+        'marker', 'markers', 'saucer', 'saucers', 'needle', 'needles', 'referee',
+        'capacity', 'sleeve', 'sleeves'
     }
     
     BROAD_QUERY_MODIFIERS = {
@@ -96,24 +97,37 @@ class HybridSearchService:
             vars.append(w + 'es')
         return list(set(vars))
         
-    def _matches_product_type(self, name: str, description: str, requested_types: List[str]) -> bool:
+    def _matches_product_type(self, name: str, description: str, requested_types: List[str], category_level_1: str = '', category_level_2: str = '') -> bool:
         if not requested_types:
             return True
         name_lower = name.lower() if name else ""
         desc_lower = description.lower() if description else ""
+        cat1_lower = category_level_1.lower() if category_level_1 else ""
+        cat2_lower = category_level_2.lower() if category_level_2 else ""
         
-        # 1. First check presence of the product type in name or description
+        # 1. First check presence of the product type in name or matching category fields (not solely description)
         has_presence = False
         for p_type in requested_types:
             variations = self._get_product_type_variations(p_type)
-            if any(var in name_lower or var in desc_lower for var in variations):
+            if any(var in name_lower or var in cat1_lower or var in cat2_lower for var in variations):
                 has_presence = True
                 break
                 
         if not has_presence:
             return False
             
-        # 2. Apply head-noun post-modifier rejection on the product name
+        # 2. Dynamic check for pre-modifier relation phrases:
+        # e.g., "for [product_type]", "fits inside [product_type]", "compatible with [product_type]"
+        for p_type in requested_types:
+            variations = self._get_product_type_variations(p_type)
+            for var in variations:
+                for prefix in ['for ', 'fits inside ', 'fits in ', 'inside ', 'compatible with ', 'protection for ', 'to protect ', 'suitable for ', 'designed for ']:
+                    if prefix + var in name_lower:
+                        logger.info(f"Excluding '{name}' because it contains '{prefix + var}' (pre-modifier phrase relationship)")
+                        return False
+
+        # 3. Preposition/context-aware check for exclusion modifiers
+        # If any word in name is an exclusion modifier, it must be preceded by an accessory-introducing word ('with', 'including', 'and', '+')
         name_words = [w.strip('.,()[]-+*#') for w in name_lower.split()]
         name_words = [w for w in name_words if w]
         
@@ -123,6 +137,32 @@ class HybridSearchService:
             for var in variations:
                 active_exclusions.discard(var)
                 
+        # Backpack-specific: discard 'bag'/'bags' because "backpack bag" is a common valid name
+        if any(pt in ['backpack', 'backpacks'] for pt in requested_types):
+            active_exclusions.discard('bag')
+            active_exclusions.discard('bags')
+            
+        # Excluded items that are allowed to be bundled as physical accessories
+        ALLOW_ACCESSORIES = {
+            'cover', 'covers', 'holder', 'holders', 'net', 'nets', 'whistle', 'whistles', 
+            'card', 'cards', 'strap', 'straps', 'brush', 'brushes', 'needle', 'needles'
+        }
+                
+        # Check each word
+        for i, word in enumerate(name_words):
+            if word in active_exclusions:
+                is_accessory = False
+                if word in ALLOW_ACCESSORIES:
+                    lookback_range = range(max(0, i-3), i)
+                    for j in lookback_range:
+                        if name_words[j] in ['with', 'including', 'and', '+']:
+                            is_accessory = True
+                            break
+                if not is_accessory:
+                    logger.info(f"Excluding '{name}' because word '{word}' is not introduced as an accessory (no 'with'/'including'/'and' preceding it)")
+                    return False
+                    
+        # 4. Standard head-noun post-modifier rejection on the product name
         last_match_idx = -1
         for i, word in enumerate(name_words):
             for p_type in requested_types:
@@ -131,11 +171,19 @@ class HybridSearchService:
                     last_match_idx = i
                     
         if last_match_idx != -1:
-            for word in name_words[last_match_idx + 1:]:
+            for i, word in enumerate(name_words[last_match_idx + 1:], start=last_match_idx + 1):
                 if word in active_exclusions:
-                    logger.info(f"Excluding '{name}' because it is modified by '{word}' (not in requested types)")
-                    return False
-                    
+                    is_accessory = False
+                    if word in ALLOW_ACCESSORIES:
+                        lookback_range = range(max(0, i-3), i)
+                        for j in lookback_range:
+                            if name_words[j] in ['with', 'including', 'and', '+']:
+                                is_accessory = True
+                                break
+                    if not is_accessory:
+                        logger.info(f"Excluding '{name}' because it is modified by '{word}' (post-modifier check)")
+                        return False
+                        
         return True
     
     def _safe_lower(self, value) -> str:
@@ -329,9 +377,17 @@ class HybridSearchService:
             if keywords and len(keywords) > 0:
                 keyword_conditions = []
                 for keyword in keywords:
-                    keyword_conditions.append(
-                        "to_tsvector('english', COALESCE(name, '') || ' ' || COALESCE(description, '')) @@ plainto_tsquery('english', %s)"
-                    )
+                    kw_lower = keyword.lower()
+                    if kw_lower in self.KNOWN_PRODUCT_TYPES:
+                        # Product type keyword: must match in name OR category (not solely description)
+                        keyword_conditions.append(
+                            "to_tsvector('english', COALESCE(name, '') || ' ' || COALESCE(category_level_1, '') || ' ' || COALESCE(category_level_2, '')) @@ plainto_tsquery('english', %s)"
+                        )
+                    else:
+                        # Non-product type keyword: can match in name OR description
+                        keyword_conditions.append(
+                            "to_tsvector('english', COALESCE(name, '') || ' ' || COALESCE(description, '')) @@ plainto_tsquery('english', %s)"
+                        )
                     params.append(keyword)
                 
                 # AND mode: product must contain ALL keywords; OR mode: any keyword
@@ -489,7 +545,13 @@ class HybridSearchService:
                 continue
                 
             # 3. Product type validation
-            if has_product_type and not self._matches_product_type(product_name, product.get('description'), requested_product_types):
+            if has_product_type and not self._matches_product_type(
+                product_name, 
+                product.get('description'), 
+                requested_product_types,
+                product.get('category_level_1', ''),
+                product.get('category_level_2', '')
+            ):
                 logger.info(f"Rejecting '{product_name}' [id={product_id}] because it does not match requested product type(s): {requested_product_types}")
                 continue
             

@@ -155,7 +155,6 @@ api = Api(
         POST /api/v1/debug/task - Test TaskTool directly
         POST /api/v1/debug/compare - Test CompareTool directly
         POST /api/v1/debug/alternatives - Test AlternativesTool directly
-        POST /api/v1/debug/embedding - Test local embedding generation
     
     **Architecture:**
         User → /api/v1/query → Local Model Server → Tools → PostgreSQL
@@ -228,7 +227,6 @@ def initialize():
         logger.info("  POST /api/v1/debug/task")
         logger.info("  POST /api/v1/debug/compare")
         logger.info("  POST /api/v1/debug/alternatives")
-        logger.info("  POST /api/v1/debug/embedding")
         logger.info("")
         logger.info("System:")
         logger.info("  GET  /api/v1/system/health")
@@ -284,10 +282,6 @@ compare_request = api.model('CompareRequest', {
 
 alternatives_request = api.model('AlternativesRequest', {
     'product': fields.String(required=True, description='Product ID', example='MH500')
-})
-
-embedding_request = api.model('EmbeddingRequest', {
-    'text': fields.String(required=True, description='Text to embed', example='running shoes')
 })
 
 
@@ -879,70 +873,6 @@ class AlternativesDebugEndpoint(Resource):
             return {'error': 'Validation error', 'message': str(e)}, 400
         except Exception as e:
             logger.error(f"[DEBUG] AlternativesTool error: {e}")
-            logger.error(traceback.format_exc())
-            return {'error': str(e)}, 500
-
-
-@ns_debug.route('/embedding')
-class EmbeddingDebugEndpoint(Resource):
-    """Debug endpoint: Test local embedding generation"""
-    
-    @api.doc('embedding_debug')
-    @api.expect(embedding_request)
-    @api.response(200, 'Success')
-    @require_api_key
-    def post(self):
-        """
-        Generate embedding for text (debug)
-        
-        Tests local sentence-transformers embedding generation.
-        NO HTTP calls to model server.
-        
-        Useful for testing:
-        - Embedding service functionality
-        - Embedding dimensions (384)
-        - Vector normalization
-        """
-        initialize()
-        
-        try:
-            data = request.get_json()
-            
-            if not data or 'text' not in data:
-                return {'error': 'Text field required'}, 400
-            
-            text = data['text'].strip()
-            
-            if not text:
-                return {'error': 'Text cannot be empty'}, 400
-            
-            logger.info(f"[DEBUG] Generating embedding for: {text}")
-            
-            # Import embedding module
-            from embedding import get_embedding
-            
-            # Generate embedding
-            embedding = get_embedding(text)
-            
-            # Calculate norm to verify normalization
-            import numpy as np
-            norm = float(np.linalg.norm(embedding))
-            
-            logger.info(f"[DEBUG] ✓ Embedding generated")
-            logger.info(f"[DEBUG]   Dimension: {len(embedding)}")
-            logger.info(f"[DEBUG]   Norm: {norm:.6f}")
-            
-            return {
-                'text': text,
-                'dimension': len(embedding),
-                'embedding_preview': embedding[:10],  # First 10 values
-                'norm': norm,
-                'model': 'sentence-transformers/all-MiniLM-L6-v2',
-                'note': 'Embedding generated locally (no HTTP call to model server)'
-            }, 200
-            
-        except Exception as e:
-            logger.error(f"[DEBUG] Embedding error: {e}")
             logger.error(traceback.format_exc())
             return {'error': str(e)}, 500
 

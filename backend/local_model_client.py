@@ -267,19 +267,57 @@ class LocalModelClient:
             logger.error(f"❌ Unexpected error: {e}")
             raise
     
-    # LEGACY - NO LONGER USED
-    # Embeddings are now generated locally in backend/embedding.py
-    # using sentence-transformers instead of HTTP calls to /embed endpoint
-    #
-    # def embed(self, texts: list) -> list:
-    #     """
-    #     Generate embeddings for the given texts.
-    #     
-    #     DEPRECATED: This method is no longer used.
-    #     Embeddings are now generated locally using sentence-transformers.
-    #     See backend/embedding.py for the new implementation.
-    #     """
-    #     pass
+    def embed(self, texts: list) -> list:
+        """
+        Generate embeddings for the given texts.
+        
+        Args:
+            texts: List of texts to embed
+        
+        Returns:
+            List of embeddings (each embedding is a list of floats)
+        """
+        try:
+            logger.info(f"📤 Sending embed request: {len(texts)} texts")
+            
+            payload = {"texts": texts}
+            
+            response = requests.post(
+                f"{self.base_url}/embed",
+                json=payload,
+                timeout=self.timeout
+            )
+            
+            # Check response status
+            if response.status_code != 200:
+                logger.error(f"❌ Embed failed: {response.status_code}")
+                logger.error(f"   Response: {response.text}")
+                raise ValueError(
+                    f"Embed failed with status {response.status_code}: {response.text}"
+                )
+            
+            # Parse response
+            result = response.json()
+            
+            # Validate structure
+            if "embeddings" not in result:
+                logger.error(f"❌ Invalid response format: {result}")
+                raise ValueError("Response missing 'embeddings' field")
+            
+            embeddings = result["embeddings"]
+            dimension = result.get("dimension", 0)
+            model_name = result.get("model", "unknown")
+            
+            logger.info("✓ Embed successful")
+            logger.info(f"   Count: {len(embeddings)}")
+            logger.info(f"   Dimension: {dimension}")
+            logger.info(f"   Model: {model_name}")
+            
+            return embeddings
+            
+        except Exception as e:
+            logger.error(f"❌ Unexpected error in embed: {e}")
+            raise
 
 
 # Global singleton instance

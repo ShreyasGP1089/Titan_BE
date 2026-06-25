@@ -1,89 +1,87 @@
 """
-Embedding generation module using local sentence-transformers.
+Embedding generation module using remote model server.
 
-This module generates embeddings locally in the backend using sentence-transformers.
-NO HTTP calls to model server for embeddings.
-
-The model server (local_model_server.py) should ONLY handle intent parsing.
+This module uses the local model server (running on Mac) for embeddings.
+NO local torch, NO sentence-transformers, NO model loading in backend.
 """
 import logging
-from sentence_transformers import SentenceTransformer
+import os
+import requests
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# Model configuration
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+# Configuration
+LOCAL_MODEL_URL = os.getenv("LOCAL_MODEL_URL", "http://localhost:8000")
 EMBEDDING_DIMENSION = 384
 
-# Load model once at module level
-logger.info(f"Loading embedding model: {EMBEDDING_MODEL}")
-try:
-    _model = SentenceTransformer(EMBEDDING_MODEL)
-    logger.info(f"✓ Embedding model loaded successfully (dimension: {EMBEDDING_DIMENSION})")
-except Exception as e:
-    logger.error(f"❌ Failed to load embedding model: {e}")
-    _model = None
+logger.info(f"✓ Using remote embedding server at {LOCAL_MODEL_URL}")
 
 
 def get_embedding(text):
     """
-    Generate embedding for input text using local sentence-transformers.
+    Generate embedding for input text using remote server.
     
     Args:
         text: Input text string
     
     Returns:
-        List of floats representing the embedding vector (384 dimensions)
-    
-    Raises:
-        ValueError: If text is empty or model not loaded
+        List of floats representing the embedding vector
     """
     if not text or not isinstance(text, str):
         raise ValueError("Input text must be a non-empty string")
     
-    if _model is None:
-        raise RuntimeError("Embedding model not loaded")
-    
-    # Generate embedding with normalization
-    embedding = _model.encode(
-        text,
-        normalize_embeddings=True
-    )
-    
-    # Convert numpy array to list
-    return embedding.tolist()
+    url = f"{LOCAL_MODEL_URL}/embed"
+    try:
+        payload = {"texts": [text]}
+        response = requests.post(url, json=payload, timeout=30)
+        
+        if response.status_code != 200:
+            logger.error(f"❌ Embed failed with status {response.status_code}: {response.text}")
+            raise ValueError(f"Embed failed with status {response.status_code}: {response.text}")
+            
+        result = response.json()
+        if "embeddings" not in result or not result["embeddings"]:
+            raise ValueError("Invalid response: 'embeddings' field missing or empty")
+            
+        return result["embeddings"][0]
+        
+    except Exception as e:
+        logger.error(f"Failed to generate embedding via HTTP: {e}")
+        raise
 
 
 def get_embeddings_batch(texts):
     """
-    Generate embeddings for multiple texts using local sentence-transformers.
+    Generate embeddings for multiple texts using remote server.
     
     Args:
         texts: List of text strings
     
     Returns:
         List of embedding vectors
-    
-    Raises:
-        ValueError: If texts is empty or model not loaded
     """
     if not texts or not isinstance(texts, list):
         raise ValueError("Input must be a non-empty list of strings")
-    
-    if _model is None:
-        raise RuntimeError("Embedding model not loaded")
-    
-    # Generate embeddings with normalization (batch processing)
-    embeddings = _model.encode(
-        texts,
-        normalize_embeddings=True,
-        batch_size=32
-    )
-    
-    # Convert numpy arrays to lists
-    return [emb.tolist() for emb in embeddings]
-
-
-# NO HTTP calls to /embed endpoint
-# NO dependency on local_model_client
-# All embedding generation happens locally using sentence-transformers
+        
+    url = f"{LOCAL_MODEL_URL}/embed"
+    try:
+        payload = {"texts": texts}
+        response = requests.post(url, json=payload, timeout=30)
+        
+        if response.status_code != 200:
+            logger.error(f"❌ Embed batch failed with status {response.status_code}: {response.text}")
+            raise ValueError(f"Embed batch failed with status {response.status_code}: {response.text}")
+            
+        result = response.json()
+        if "embeddings" not in result:
+            raise ValueError("Invalid response: 'embeddings' field missing")
+            
+        return result["embeddings"]
+        
+    except Exception as e:
+        logger.error(f"Failed to generate batch embeddings via HTTP: {e}")
+        raise
