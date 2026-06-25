@@ -191,6 +191,7 @@ backend/planner.py
 *.bin
 *.safetensors
 models/
+!backend/models/
 checkpoints/
 
 # Hugging Face cache (too large, will download on server)
