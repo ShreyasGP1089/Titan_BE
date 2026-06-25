@@ -5,6 +5,10 @@ Qwen3-4B + PostgreSQL + pgvector
 Architecture:
     User → api_swagger.py → local_model_server.py → Tools → PostgreSQL
 """
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from flask import Flask, request, jsonify
 from flask_restx import Api, Resource, fields
 from flask_cors import CORS
