@@ -1,0 +1,36 @@
+# Render Backend Requirements (Pure Tool Executor)
+# For 512 MB RAM free tier - NO ML MODELS, NO LLM
+
+# Database
+psycopg2-binary==2.9.9
+
+# API Framework
+flask==3.0.0
+flask-cors==4.0.0
+flask-restx==1.3.0
+gunicorn==21.2.0
+
+# HTTP Client (for remote embedding service if needed)
+requests==2.31.0
+
+# Validation
+pydantic==2.5.0
+
+# Utilities
+python-dotenv==1.0.0
+
+# pgvector support
+pgvector==0.2.4
+
+# Minimal numpy (for array handling only)
+numpy==1.24.3
+
+# NO torch
+# NO transformers  
+# NO sentence-transformers
+# NO accelerate
+# NO peft
+# NO bitsandbytes
+# NO SQLAlchemy (using raw psycopg2)
+
+# Architecture: Pure tool executor receiving structured JSON from Workflow Agent
