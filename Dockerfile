@@ -12,6 +12,8 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+ENV PYTHONPATH=/app/backend
+
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     build-essential \
@@ -21,6 +23,7 @@ RUN apt-get update && apt-get install -y \
 
 # Copy requirements
 COPY backend/requirements_production.txt requirements.txt
+COPY backend/requirements_render.txt requirements_render.txt
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
@@ -30,7 +33,6 @@ RUN pip install --no-cache-dir gunicorn
 
 # Copy application code
 COPY backend/ ./backend/
-COPY training/outputs/qwen25_1_5b_lora_hf/ ./training/outputs/qwen25_1_5b_lora_hf/
 
 # Create necessary directories
 RUN mkdir -p /app/backend /app/training/outputs
