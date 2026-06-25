@@ -30,7 +30,6 @@ RUN pip install --no-cache-dir gunicorn
 
 # Copy application code
 COPY backend/ ./backend/
-COPY training/outputs/qwen25_1_5b_lora_hf/ ./training/outputs/qwen25_1_5b_lora_hf/
 
 # Create necessary directories
 RUN mkdir -p /app/backend /app/training/outputs
