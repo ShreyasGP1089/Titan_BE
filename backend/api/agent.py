@@ -2,11 +2,14 @@
 Unified Agent Endpoint
 Routes structured JSON requests to appropriate tools
 """
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import logging
 from flask import Flask, request, jsonify
 from flask_restx import Api, Resource, fields, Namespace
 from flask_cors import CORS
-import os
 from functools import wraps
 from pydantic import ValidationError
 
