@@ -5,7 +5,8 @@ Test embedding endpoint on local model server
 import requests
 import json
 
-LOCAL_URL = "http://localhost:8001"
+import os
+LOCAL_URL = os.getenv("LOCAL_MODEL_URL", "http://localhost:8000")
 
 def test_embed():
     """Test the /embed endpoint."""

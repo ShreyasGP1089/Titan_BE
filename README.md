@@ -1,180 +1,284 @@
-# Decathlon Smart Search System
+# Decathlon Smart Shopping API
 
-> **Fine-tuned Qwen2.5-1.5B-Instruct + Hybrid Search + PostgreSQL + pgvector**
+Single unified API with Qwen3-4B intent parser for natural language shopping queries.
 
-Complete AI-powered conversational commerce backend for e-commerce product search.
+## Architecture
 
-## 🎯 What This Is
+```
+User → api_swagger.py (port 5000)
+         ↓
+      local_model_server.py (port 8000)
+         ↓
+      Qwen3-4B + LoRA → Intent JSON
+         ↓
+      Tools (Search, Task, Compare, Alternatives)
+         ↓
+      PostgreSQL + pgvector
+         ↓
+      Results
+```
 
-- **Fine-tuned LLM** (Qwen2.5-1.5B-Instruct with LoRA) for query understanding
-- **Hybrid Search** (Keyword filtering + Semantic ranking with pgvector)
-- **Vector Database** (PostgreSQL with 8,829 products)
-- **REST API** (Flask + Swagger documentation)
+## Quick Start
 
-## 🚀 Quick Start
+### 1. Train the Model (One-Time Setup)
 
 ```bash
-# Start API
+cd training
+./setup_mlx.sh              # Install MLX and dependencies
+source venv_mlx/bin/activate
+python3 train_mlx.py --mode train --iters 300
+```
+
+Expected time: ~15 minutes on M1/M2/M3 Mac
+
+### 2. Start the System
+
+```bash
+./start_system.sh
+```
+
+This starts:
+1. **Local Model Server** (port 8000) - Qwen3-4B intent parser
+2. **Backend API** (port 5000) - Swagger-documented REST API
+
+### 3. Test the API
+
+```bash
+curl -X POST http://localhost:5000/api/v1/query \
+  -H "Api-Key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"running shoes under 5000"}'
+```
+
+Or visit the Swagger UI:
+```
+http://localhost:5000/docs
+```
+
+## Supported Queries
+
+### Search Intent
+```
+"running shoes under 5000"
+"waterproof hiking shoes"
+"football boots for men"
+```
+
+### Task Intent (Activity Shopping)
+```
+"I want to start playing golf"
+"golf equipment under 15000"
+"camping gear for beginners"
+```
+
+### Compare Intent
+```
+"compare MH500 and NH500"
+"compare product ABC123 with XYZ456"
+```
+
+### Alternatives Intent
+```
+"alternatives to MH500"
+"similar products to ABC123"
+```
+
+## API Endpoints
+
+### POST /api/v1/query
+Execute natural language query
+
+**Request:**
+```json
+{
+  "query": "running shoes under 5000"
+}
+```
+
+**Response:**
+```json
+{
+  "type": "search",
+  "products": [...],
+  "total": 10,
+  "query": "running shoes under 5000"
+}
+```
+
+### GET /api/v1/system/health
+Check system health
+
+**Response:**
+```json
+{
+  "status": "healthy",
+  "api": "running",
+  "model_server": "connected",
+  "database": "connected",
+  "model": "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+}
+```
+
+### GET /docs
+Swagger UI documentation
+
+## Development
+
+### Run Model Server Only
+```bash
+cd training
+source venv_mlx/bin/activate
+python3 local_model_server.py
+```
+
+### Run Backend API Only
+```bash
 cd backend
 python3 api_swagger.py
-
-# Test API
-python3 test_smart_search_fixed.py
-
-# Open Swagger UI
-open http://localhost:5000/docs
 ```
 
-## 📡 Three API Endpoints
-
-| Endpoint | Purpose | Speed | Use When |
-|----------|---------|-------|----------|
-| `/parse-query` | Natural language → JSON | ~500ms | Testing, custom integration |
-| `/hybrid-search` | JSON → Products | ~100ms | Fast search |
-| `/smart-search` | Natural language → Complete response | ~1-2s | End users |
-
-### Quick Examples
-
-```bash
-# Parse query (get JSON)
-curl -X POST http://localhost:5000/api/v1/shopping/parse-query \
-  -H "Content-Type: application/json" \
-  -d '{"query": "football cleats under 5000"}'
-
-# Search with JSON
-curl -X POST http://localhost:5000/api/v1/shopping/hybrid-search \
-  -H "Content-Type: application/json" \
-  -d '{"parsed_query": {"intent": "search", "search_request": {...}}}'
-
-# Complete pipeline
-curl -X POST http://localhost:5000/api/v1/shopping/smart-search \
-  -H "Content-Type: application/json" \
-  -d '{"query": "football cleats under 5000"}'
-```
-
-## 📚 Documentation
-
-- **API_GUIDE.md** - Complete API reference with examples
-- **Swagger UI** - http://localhost:5000/docs (interactive testing)
-
-## 🏗️ Architecture
-
-```
-User Query → Fine-tuned Qwen 3:4B → Structured JSON
-    → Keyword Filter (SQL) → Semantic Rank (pgvector)
-    → Qwen Re-ranking → Products + Recommendations
-```
-
-**Tech Stack**: Python 3.11+, PostgreSQL + pgvector, Apple MLX, Flask, Qwen 3:4B
-
-## 📁 Project Structure
-
-```
-Toolset/
-├── backend/              # API and search logic
-│   ├── api_swagger.py           # Main API
-│   ├── mlx_planner.py           # MLX integration
-│   ├── search_pipeline.py       # Hybrid search
-│   ├── db.py                    # Database
-│   └── test_*.py                # Tests
-├── training/             # Model training
-│   ├── train_mlx.py             # Training script
-│   ├── inference_mlx.py         # Testing script
-│   └── outputs/                 # Fine-tuned model
-└── API_GUIDE.md          # Complete documentation
-```
-
-## ⚠️ Important: Chaining Endpoints
-
-When using `/parse-query` → `/hybrid-search`:
-
-```python
-# ✅ CORRECT
-response = requests.post("/parse-query", json={"query": "..."}).json()
-parsed_query = response['parsed_query']  # Extract only this!
-requests.post("/hybrid-search", json={"parsed_query": parsed_query})
-
-# ❌ WRONG - Don't pass entire response
-requests.post("/hybrid-search", json=response)  # FAILS!
-```
-
-See **API_GUIDE.md** for detailed examples.
-
-## 🧪 Testing
-
+### Test Individual Tools
 ```bash
 cd backend
-
-# Test all endpoints
-python3 test_smart_search_fixed.py
-
-# Test parse-query only
-python3 test_parse_query.py
-
-# Test model separately (no API)
-cd ../training
-python3 inference_mlx.py
+python3 test_agent_api.py
 ```
 
-## 📈 Performance
+## Project Structure
 
-- **Parse**: ~500ms (MLX inference)
-- **Search**: ~100ms (hybrid keyword + semantic)
-- **Complete**: ~1-2s (parse + search + recommendations)
+```
+backend/
+├── api_swagger.py          # Single public API (Flask + Flask-RESTX)
+├── tools/
+│   ├── search_tool.py      # Product search with filters
+│   ├── task_tool.py        # Activity-based shopping
+│   ├── compare_tool.py     # Product comparison
+│   └── alternatives_tool.py # Find similar products
+├── services/
+│   ├── hybrid_search.py    # Hybrid search (SQL + pgvector)
+│   └── embedding_service.py # Semantic embeddings
+├── models/
+│   └── schemas.py          # Pydantic validation schemas
+├── database.py             # PostgreSQL connection pool
+└── db/
+    └── queries.py          # Database queries
 
-## 🔧 Prerequisites
+training/
+├── local_model_server.py   # FastAPI intent parser
+├── train_mlx.py            # MLX training script
+├── data/
+│   ├── train.jsonl         # Training data (3166 examples)
+│   ├── valid.jsonl
+│   └── test.jsonl
+└── outputs/
+    └── qwen3_4b_lora_mlx/  # Fine-tuned adapter weights
+```
 
-- Python 3.11+
-- PostgreSQL with pgvector extension
-- Apple Silicon Mac (for MLX)
-- 8GB+ RAM
+## Training Data Format (ChatML)
 
-## 📊 Database
+```json
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a Decathlon shopping assistant..."
+    },
+    {
+      "role": "user",
+      "content": "running shoes under 5000"
+    },
+    {
+      "role": "assistant",
+      "content": "{\"intent\":\"search\",\"search_request\":{\"sport\":\"Running\",\"category_level_1\":\"Footwear\",\"keywords\":[\"running\",\"shoes\"],\"price_limit\":5000}}"
+    }
+  ]
+}
+```
+
+## Environment Variables
 
 ```bash
-# Check database
-psql -U decathlonuser -d decathlon_db -c "SELECT COUNT(*) FROM products;"
-# Should return: 8829
+# Backend
+API_KEY=decathlon_smart_search_2024_secure_key_abc123xyz
+LOCAL_MODEL_URL=http://localhost:8000
 
-psql -U decathlonuser -d decathlon_db -c "SELECT COUNT(*) FROM product_embeddings;"
-# Should return: 8829
+# Database
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=decathlon_rag
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=your_password
+
+# Model Server
+MODEL_SERVER_PORT=8000
 ```
 
-## 🐛 Troubleshooting
+## Tech Stack
 
-### API won't start?
+- **Backend**: Flask + Flask-RESTX
+- **Model**: Qwen3-4B-Instruct-4bit + LoRA fine-tuning
+- **ML Framework**: MLX (Apple Silicon optimization)
+- **Database**: PostgreSQL + pgvector
+- **Validation**: Pydantic
+- **Python**: 3.11
+
+## Deployment
+
+### Render (Backend Only)
+- Build: `pip install -r requirements_render.txt`
+- Start: `gunicorn api_swagger:app --bind 0.0.0.0:$PORT`
+- RAM: ~200 MB (fits in 512 MB free tier)
+- **Note**: Model server must run on separate Mac machine with ngrok
+
+### Local Mac (Full System)
+- Supports Apple Silicon (M1/M2/M3)
+- RAM: ~2 GB (model) + ~200 MB (backend)
+- Use `./start_system.sh` to run both services
+
+## Testing
+
 ```bash
-lsof -i :5000  # Check if port is in use
+# Test search
+curl -X POST http://localhost:5000/api/v1/query \
+  -H "Api-Key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"running shoes under 5000"}'
+
+# Test task
+curl -X POST http://localhost:5000/api/v1/query \
+  -H "Api-Key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"I want to start playing golf with budget 15000"}'
+
+# Test health
+curl http://localhost:5000/api/v1/system/health
 ```
 
-### Model not found?
+## Troubleshooting
+
+### Model server not connecting
+```bash
+# Check if model server is running
+curl http://localhost:8000/health
+
+# If not, start it manually
+cd training
+source venv_mlx/bin/activate
+python3 local_model_server.py
+```
+
+### Database connection failed
+```bash
+# Check PostgreSQL is running
+psql -h localhost -U postgres -d decathlon_rag -c "SELECT 1"
+
+# Check environment variables
+cat backend/.env
+```
+
+### MLX not installed
 ```bash
 cd training
-python3 train_mlx.py  # Train the model (~30-45 min)
+./setup_mlx.sh
+source venv_mlx/bin/activate
+python3 -c "import mlx_lm; print('MLX installed')"
 ```
-
-### Test model only?
-```bash
-cd training
-python3 inference_mlx.py  # Test without API/database
-```
-
-## ✅ What's Working
-
-- ✅ Fine-tuned model (Qwen 3:4B + LoRA, 89% loss reduction)
-- ✅ Hybrid search (keyword + semantic ranking)
-- ✅ 3 API endpoints operational
-- ✅ Model pre-loads on startup (no cold start)
-- ✅ 8,829 products indexed with embeddings
-- ✅ Complete documentation + test suites
-
-## 📖 Learn More
-
-- **Complete API Guide**: See `API_GUIDE.md`
-- **Interactive Docs**: http://localhost:5000/docs
-- **Training Guide**: `training/MLX_TRAINING_GUIDE.md`
-- **Backend Setup**: `backend/QUICKSTART.md`
-
----
-
-**Ready to use!** Start with: `cd backend && python3 api_swagger.py`

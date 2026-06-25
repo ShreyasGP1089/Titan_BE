@@ -9,7 +9,7 @@ import logging
 from typing import List, Dict, Optional, Union
 from decimal import Decimal
 from psycopg2.extras import RealDictCursor
-from db import connect_db, release_connection
+from database import connect_db, release_connection
 from embedding import get_embedding
 
 logger = logging.getLogger(__name__)

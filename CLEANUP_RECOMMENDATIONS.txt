@@ -1,0 +1,246 @@
+CLEANUP RECOMMENDATIONS - CONSERVATIVE APPROACH
+================================================
+
+## ANALYSIS COMPLETE
+
+I've analyzed the codebase and found potential cleanup candidates.
+Following your strict safety rules, here's what I recommend.
+
+
+## DEPENDENCY CHAIN DISCOVERED
+
+Active Chain:
+  api_swagger.py
+    → tools/search_tool.py
+      → services/hybrid_search.py
+        → services/embedding_service.py
+          → embedding.py ✅ MUST KEEP
+
+Conclusion: **embedding.py IS USED** by active code via services.
+
+
+## SAFE TO MOVE (Phase 1) - Awaiting Your Approval
+
+### 1. Duplicate Model Server (OLD VERSION)
+```
+./local_model_server.py
+```
+**Why:** 
+  - Uses old Qwen2.5-1.5B model
+  - training/local_model_server.py is the active version (Qwen3-4B)
+  - start_system.sh uses training/ version
+
+**Action:**
+```bash
+mv local_model_server.py backup_old/root_local_model_server_OLD.py
+```
+
+**Risk:** LOW - duplicate file, not referenced
+
+
+### 2. Legacy API Files
+```
+backend/api.py
+backend/main.py
+backend/api/
+```
+**Why:**
+  - NOT imported by api_swagger.py (active API)
+  - api.py imports old "from planner import shopping_planner"
+  - main.py also uses old planner
+  - api/ folder contains old agent.py
+  
+**Action:**
+```bash
+mv backend/api.py backup_old/backend_api_OLD.py
+mv backend/main.py backup_old/backend_main_OLD.py
+mv backend/api/ backup_old/backend_api_folder/
+```
+
+**Risk:** LOW - superseded by api_swagger.py
+
+
+## CANNOT SAFELY MOVE (Used by Each Other)
+
+These files form a legacy chain that's interconnected:
+
+```
+planner.py → qwen_client.py
+hf_planner.py → local_model_client.py + search_pipeline.py
+mlx_planner.py → search_pipeline.py
+search_pipeline.py → embedding.py
+embedding.py → local_model_client.py
+tools.py → embedding.py
+```
+
+**Problem:** They import each other
+**Current Status:** NOT used by api_swagger.py
+**BUT:** embedding.py IS used by services/embedding_service.py (ACTIVE)
+
+**Recommendation:** KEEP FOR NOW
+  - embedding.py is ACTIVE (used by services/)
+  - Others may break if moved individually
+  - Need careful untangling
+
+
+## TEST FILES - REQUIRES EVALUATION
+
+### New Tests (KEEP - Active)
+```
+backend/test_budget_optimizer.py ✅
+backend/test_budget_debug.py ✅
+backend/test_budget_simple.py ✅
+backend/demo_budget_optimizer.py ✅
+```
+
+### Legacy Tests (Evaluate)
+```
+backend/test_agent_api.py
+backend/test_api_auth.py
+backend/test_base_model.py
+backend/test_hf_planner.py
+backend/test_imports.py
+backend/test_llm.py
+backend/test_parse_query.py
+backend/test_smart_search_api.py
+backend/test_smart_search_fixed.py
+backend/test_tools.py
+```
+
+**Question:** Do you want to keep these for reference or move to backup_old/?
+
+
+### Root Test Files
+```
+test_both_intents.py
+test_chatml_inference.py
+test_duplicates.py
+test_embeddings.py
+test_local_model.py
+test_prompt_format.py
+```
+
+**Recommendation:** MOVE to backup_old/ (test old model server)
+
+
+## TRAINING FILES - REQUIRES EVALUATION
+
+```
+training/train.py ❓
+training/train_hf.py ❓
+training/train_simple.py ❓
+```
+
+Active: training/train_mlx.py ✅
+
+**Question:** Are the other training scripts needed for reference?
+
+
+## MY CONSERVATIVE RECOMMENDATION
+
+### Execute Now (Safest Actions):
+
+```bash
+# 1. Move duplicate model server
+mv local_model_server.py backup_old/root_local_model_server_OLD.py
+
+# 2. Move legacy API files
+mv backend/api.py backup_old/backend_api_OLD.py
+mv backend/main.py backup_old/backend_main_OLD.py
+mv backend/api/ backup_old/backend_api_folder/
+
+# 3. Move root test files (test old model)
+mv test_both_intents.py backup_old/
+mv test_chatml_inference.py backup_old/
+mv test_duplicates.py backup_old/
+mv test_embeddings.py backup_old/
+mv test_local_model.py backup_old/
+mv test_prompt_format.py backup_old/
+```
+
+**Risk:** MINIMAL - These are clear duplicates/superseded files
+
+
+### Need Your Decision:
+
+**A. Backend Legacy Test Files**
+Keep or move to backup_old/?
+  - test_agent_api.py
+  - test_api_auth.py
+  - test_base_model.py
+  - test_hf_planner.py
+  - test_imports.py
+  - test_llm.py
+  - test_parse_query.py
+  - test_smart_search_api.py
+  - test_smart_search_fixed.py
+  - test_tools.py
+
+**B. Old Training Scripts**
+Keep or move to backup_old/?
+  - training/train.py
+  - training/train_hf.py
+  - training/train_simple.py
+
+**C. Legacy Planner Chain**
+This requires careful analysis:
+  - planner.py
+  - hf_planner.py
+  - mlx_planner.py
+  - qwen_client.py
+  - local_model_client.py
+  - search_pipeline.py
+  - tools.py
+
+**KEEP:** embedding.py (ACTIVE - used by services/)
+
+Recommendation: KEEP ALL for now until we can verify they're truly unused.
+
+
+## ABSOLUTELY PROTECTED FILES ✅
+
+These will NEVER be moved:
+  - README.md
+  - start_system.sh
+  - requirements.txt (all versions)
+  - .env
+  - backend/api_swagger.py
+  - backend/database.py
+  - backend/config.py
+  - backend/embedding.py (ACTIVE)
+  - backend/tools/*.py
+  - backend/services/*.py
+  - backend/models/*.py
+  - training/local_model_server.py
+  - training/train_mlx.py
+  - training/data/
+  - training/outputs/
+  - training/venv_mlx/
+  - All documentation .txt files
+
+
+## WHAT I NEED FROM YOU
+
+Please reply with your approval for:
+
+**Phase 1 (Safe Moves):**
+[ ] YES - Move duplicate model server
+[ ] YES - Move legacy API files (api.py, main.py, api/)
+[ ] YES - Move root test files
+
+**Phase 2 (Your Decision):**
+[ ] KEEP / MOVE - Backend legacy test files?
+[ ] KEEP / MOVE - Old training scripts?
+[ ] KEEP / MOVE - Legacy planner chain? (careful!)
+
+Once you approve, I'll execute the moves to backup_old/.
+
+Files in backup_old/ can be restored anytime if needed.
+
+
+## EXECUTION SCRIPT (After Your Approval)
+
+I will create: cleanup_approved.sh
+You can review it before running.
+
+All moves are REVERSIBLE - nothing deleted permanently.

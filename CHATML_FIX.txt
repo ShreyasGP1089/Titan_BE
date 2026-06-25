@@ -1,0 +1,145 @@
+CHATML PROMPT FIX - COMPLETE
+============================
+
+Date: June 23, 2026
+File: training/local_model_server.py
+
+## Problem
+
+The tokenizer.apply_chat_template() function was failing with:
+```
+Error: Cannot use chat template functions because tokenizer.chat_template is not set
+```
+
+## Root Cause
+
+The Qwen3-4B model's tokenizer doesn't have a chat_template configured,
+but the code was trying to use:
+```python
+prompt = tokenizer.apply_chat_template(messages, ...)
+```
+
+## Solution
+
+✅ Removed all tokenizer.apply_chat_template() usage
+✅ Built prompts manually using ChatML format
+✅ Matches training format exactly
+
+## What Changed
+
+### Before (BROKEN):
+```python
+messages = [
+    {"role": "system", "content": "..."},
+    {"role": "user", "content": user_query}
+]
+prompt = tokenizer.apply_chat_template(
+    messages,
+    tokenize=False,
+    add_generation_prompt=True
+)
+```
+
+### After (FIXED):
+```python
+system_prompt = """You are a Decathlon shopping assistant..."""
+
+# Build prompt manually using ChatML format
+prompt = f"""<|im_start|>system
+{system_prompt}<|im_end|>
+<|im_start|>user
+{user_query}<|im_end|>
+<|im_start|>assistant
+"""
+```
+
+## ChatML Format
+
+The training data uses ChatML format:
+```
+<|im_start|>system
+System message here<|im_end|>
+<|im_start|>user
+User message here<|im_end|>
+<|im_start|>assistant
+Assistant response here<|im_end|>
+```
+
+Inference MUST use the same format for consistency.
+
+## Logging Added
+
+✅ Before generation:
+```python
+logger.info(f"Prompt:\n{prompt}")
+```
+
+✅ After generation:
+```python
+logger.info(f"Raw response: {response_text}")
+```
+
+This helps debug model responses.
+
+## What Was NOT Changed
+
+✅ Endpoints unchanged
+✅ Request/response format unchanged
+✅ Training code untouched
+✅ No files deleted
+✅ Only modified parse_query() function
+
+## Verification
+
+Checked that no chat template usage remains:
+```bash
+grep -n "tokenizer.apply_chat_template\|tokenizer.chat_template" training/local_model_server.py
+```
+Result: No matches (✓ Fixed)
+
+## Testing
+
+To test the fix:
+
+1. Start the server:
+```bash
+cd training
+source venv_mlx/bin/activate
+python3 local_model_server.py
+```
+
+2. Test the endpoint:
+```bash
+curl -X POST http://localhost:8000/parse-query \
+  -H "Content-Type: application/json" \
+  -d '{"query":"running shoes under 5000"}'
+```
+
+Expected: JSON response with intent and parameters
+No error about chat_template
+
+3. Check logs:
+Should see:
+```
+Prompt:
+<|im_start|>system
+...
+<|im_end|>
+<|im_start|>user
+running shoes under 5000<|im_end|>
+<|im_start|>assistant
+
+Raw response: {"intent":"search",...}
+✓ Parsed intent: search
+```
+
+## Summary
+
+✅ Removed tokenizer.apply_chat_template()
+✅ Built prompts manually with ChatML format
+✅ Matches training format
+✅ Added logging for debugging
+✅ Endpoints unchanged
+✅ No files deleted
+
+The model server should now work correctly!

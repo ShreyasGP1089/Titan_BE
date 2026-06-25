@@ -1,0 +1,518 @@
+DEBUG ENDPOINTS - DOCUMENTATION
+================================
+
+Date: June 23, 2026
+Version: 3.1.0
+
+## Overview
+
+Added 5 debug endpoints to test individual components without running the full pipeline.
+The production endpoint `/api/v1/query` remains unchanged.
+
+
+## Architecture
+
+### Production Flow (Unchanged):
+```
+User Query
+   ↓
+POST /api/v1/query
+   ↓
+LocalModelClient.parse() → SLM (port 8000)
+   ↓
+Intent Routing
+   ↓
+Tool Execution (Search/Task/Compare/Alternatives)
+   ↓
+Results
+```
+
+### Debug Flow (New):
+```
+Structured Input
+   ↓
+POST /api/v1/debug/{endpoint}
+   ↓
+Direct Tool Execution (bypass SLM)
+   ↓
+Results
+```
+
+
+## All Endpoints
+
+### Production
+```
+POST /api/v1/query                    # Main endpoint (full pipeline)
+GET  /api/v1/system/health            # Health check
+GET  /docs                            # Swagger UI
+```
+
+### Debug
+```
+POST /api/v1/debug/parse-query        # Test SLM only
+POST /api/v1/debug/search             # Test SearchTool only
+POST /api/v1/debug/task               # Test TaskTool only
+POST /api/v1/debug/compare            # Test CompareTool only
+POST /api/v1/debug/alternatives       # Test AlternativesTool only
+```
+
+
+## Debug Endpoint Details
+
+### 1. POST /api/v1/debug/parse-query
+
+**Purpose:** Test SLM output without executing tools
+
+**Request:**
+```json
+{
+  "query": "running shoes under 5000"
+}
+```
+
+**Response:**
+```json
+{
+  "intent": "search",
+  "search_request": {
+    "sport": "Running",
+    "category_level_1": "Footwear",
+    "category_level_2": null,
+    "keywords": ["running", "shoes"],
+    "price_limit": 5000
+  }
+}
+```
+
+**Use Cases:**
+- Test model server connectivity
+- Verify intent classification accuracy
+- Debug parameter extraction
+- Test SLM without database dependency
+
+**Example:**
+```bash
+curl -X POST http://localhost:5000/api/v1/debug/parse-query \
+  -H "Api-Key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"I want to start playing golf"}'
+```
+
+---
+
+### 2. POST /api/v1/debug/search
+
+**Purpose:** Test SearchTool without SLM
+
+**Request:**
+```json
+{
+  "sport": "Running",
+  "category_level_1": "Footwear",
+  "category_level_2": null,
+  "keywords": ["running", "shoes"],
+  "price_limit": 5000
+}
+```
+
+**Response:**
+```json
+{
+  "type": "search",
+  "products": [...],
+  "total": 10,
+  "query": {
+    "sport": "Running",
+    "category_level_1": "Footwear",
+    "keywords": ["running", "shoes"],
+    "price_limit": 5000
+  }
+}
+```
+
+**Use Cases:**
+- Test HybridSearch functionality
+- Debug SQL queries
+- Verify pgvector semantic search
+- Test product filtering
+- Benchmark search performance
+
+**Example:**
+```bash
+curl -X POST http://localhost:5000/api/v1/debug/search \
+  -H "Api-Key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sport": "Golf",
+    "category_level_1": null,
+    "category_level_2": null,
+    "keywords": ["clubs"],
+    "price_limit": null
+  }'
+```
+
+---
+
+### 3. POST /api/v1/debug/task
+
+**Purpose:** Test TaskTool and BudgetOptimizer without SLM
+
+**Request:**
+```json
+{
+  "activity": "Golf",
+  "budget": 10000
+}
+```
+
+**Response:**
+```json
+{
+  "type": "task",
+  "activity": "Golf",
+  "budget": 10000,
+  "items": [
+    {
+      "name": "Golf Clubs",
+      "mandatory": true,
+      "products": [...],
+      "budget_allocated": 3500
+    },
+    ...
+  ],
+  "total_cost": 9500,
+  "within_budget": true,
+  "success": true,
+  "mandatory_count": 2,
+  "optional_count": 2
+}
+```
+
+**Use Cases:**
+- Test task item generation
+- Debug product search for activities
+- Test budget optimizer algorithm
+- Verify item selection logic
+- Test mandatory vs optional items
+- Debug greedy algorithm with lookahead
+
+**Example:**
+```bash
+curl -X POST http://localhost:5000/api/v1/debug/task \
+  -H "Api-Key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "activity": "Hiking",
+    "budget": 15000
+  }'
+```
+
+---
+
+### 4. POST /api/v1/debug/compare
+
+**Purpose:** Test CompareTool without SLM
+
+**Request:**
+```json
+{
+  "products": ["MH500", "NH500"]
+}
+```
+
+**Response:**
+```json
+{
+  "type": "compare",
+  "products": [
+    {
+      "product_id": "MH500",
+      "name": "MH500 Hiking Shoe",
+      "price": 3999,
+      "rating": 4.5,
+      ...
+    },
+    {
+      "product_id": "NH500",
+      "name": "NH500 Backpack",
+      "price": 2999,
+      "rating": 4.6,
+      ...
+    }
+  ]
+}
+```
+
+**Use Cases:**
+- Test product retrieval by ID
+- Verify database queries
+- Check product data completeness
+- Test multiple product fetch
+
+**Example:**
+```bash
+curl -X POST http://localhost:5000/api/v1/debug/compare \
+  -H "Api-Key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "products": ["MH100", "MH500", "MH900"]
+  }'
+```
+
+---
+
+### 5. POST /api/v1/debug/alternatives
+
+**Purpose:** Test AlternativesTool without SLM
+
+**Request:**
+```json
+{
+  "product": "MH500"
+}
+```
+
+**Response:**
+```json
+{
+  "type": "alternatives",
+  "source_product": {
+    "product_id": "MH500",
+    "name": "MH500 Hiking Shoe",
+    "price": 3999,
+    ...
+  },
+  "products": [
+    {
+      "product_id": "MH400",
+      "name": "MH400 Hiking Shoe",
+      "price": 3500,
+      ...
+    },
+    ...
+  ],
+  "total": 8
+}
+```
+
+**Use Cases:**
+- Test alternative product discovery
+- Debug similarity logic
+- Verify price range filtering (±30%)
+- Test same sport/category filtering
+
+**Example:**
+```bash
+curl -X POST http://localhost:5000/api/v1/debug/alternatives \
+  -H "Api-Key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "product": "MH100"
+  }'
+```
+
+
+## Authentication
+
+All endpoints (production + debug) require API key authentication.
+
+**Header:**
+```
+Api-Key: decathlon_smart_search_2024_secure_key_abc123xyz
+```
+
+**Without API Key:**
+```json
+{
+  "error": "Unauthorized",
+  "message": "API key required"
+}
+```
+
+
+## Testing Strategy
+
+### 1. Bottom-Up Testing
+
+Test individual components first:
+
+```
+1. Parse Query (SLM only)
+   ↓
+2. Search/Task/Compare/Alternatives (Tools only)
+   ↓
+3. Full Pipeline (Production endpoint)
+```
+
+### 2. Component Isolation
+
+Debug each layer independently:
+
+- **SLM Issues?** → Use `/debug/parse-query`
+- **Search Issues?** → Use `/debug/search`
+- **Budget Issues?** → Use `/debug/task`
+- **Product Fetch Issues?** → Use `/debug/compare` or `/debug/alternatives`
+
+### 3. Performance Testing
+
+Measure each component's performance:
+
+```bash
+# Test SearchTool performance
+time curl -X POST http://localhost:5000/api/v1/debug/search ...
+
+# Test TaskTool + BudgetOptimizer
+time curl -X POST http://localhost:5000/api/v1/debug/task ...
+```
+
+
+## Swagger UI
+
+All endpoints are documented in Swagger UI:
+
+```
+http://localhost:5000/docs
+```
+
+Features:
+- Interactive testing
+- Request/response examples
+- Schema validation
+- Authentication testing
+
+
+## Test Script
+
+Run comprehensive tests:
+
+```bash
+./test_debug_endpoints.sh
+```
+
+This tests:
+- Health check
+- All 5 debug endpoints
+- Production endpoint
+- Displays results with color coding
+
+
+## Logging
+
+All debug endpoints use `[DEBUG]` prefix in logs:
+
+```
+[DEBUG] Parsing query: running shoes under 5000
+[DEBUG] ✓ Parsed successfully
+[DEBUG] SearchTool with params: {...}
+[DEBUG] ✓ SearchTool returned 10 products
+[DEBUG] TaskTool with params: {...}
+[DEBUG]   Total cost: ₹9500
+```
+
+
+## Error Handling
+
+### Model Server Down (parse-query):
+```json
+{
+  "error": "Service Unavailable",
+  "message": "Cannot connect to model server at http://localhost:8000"
+}
+```
+
+### Database Down (search/task/compare/alternatives):
+```json
+{
+  "error": "Database connection failed"
+}
+```
+
+### Validation Error:
+```json
+{
+  "error": "Validation error",
+  "message": "Field 'sport' is required"
+}
+```
+
+
+## Comparison: Debug vs Production
+
+### Production Endpoint:
+```
+✓ Full pipeline
+✓ Natural language input
+✓ SLM parsing
+✓ Intent routing
+✓ Tool execution
+✗ Can't isolate issues
+```
+
+### Debug Endpoints:
+```
+✓ Component isolation
+✓ Structured input
+✓ Bypasses SLM
+✓ Fast iteration
+✓ Easy debugging
+✗ Requires knowledge of parameters
+```
+
+
+## Use Cases by Role
+
+### Developer:
+- Debug component failures
+- Test new features
+- Benchmark performance
+- Validate data flow
+
+### QA Engineer:
+- Test each tool independently
+- Verify edge cases
+- Performance testing
+- Integration testing
+
+### Data Scientist:
+- Test SLM output quality
+- Verify intent classification
+- Tune search parameters
+- Optimize budget algorithm
+
+
+## Architecture Preserved
+
+✅ Original `/api/v1/query` endpoint **unchanged**
+✅ LocalModelClient class **unchanged**
+✅ All tools **unchanged**
+✅ Authentication **unchanged**
+✅ Database layer **unchanged**
+
+**Only added:** 5 new debug endpoints for testing
+
+
+## Version History
+
+- **v3.0.0**: Single unified endpoint
+- **v3.1.0**: Added 5 debug endpoints (this update)
+
+
+## Summary
+
+**Added:**
+- 5 debug endpoints
+- Test script (test_debug_endpoints.sh)
+- This documentation
+
+**Preserved:**
+- Production endpoint
+- All existing functionality
+- Architecture
+- Authentication
+
+**Benefit:**
+- Independent component testing
+- Faster debugging
+- Better observability
+- Easier development

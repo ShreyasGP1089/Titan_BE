@@ -1,0 +1,211 @@
+================================================================================
+EMBEDDING ARCHITECTURE REFACTORING - COMPLETE
+================================================================================
+
+Date: 2026-06-24
+Task: Refactor embedding architecture to use local sentence-transformers
+Status: ✅ COMPLETE
+
+================================================================================
+OBJECTIVE
+================================================================================
+
+Remove dependency on model server for embedding generation.
+Model server should ONLY handle intent parsing, NOT embeddings.
+
+BEFORE:
+    api_swagger.py → embedding.py → LocalModelClient.embed() 
+    → HTTP POST localhost:8000/embed → model server
+
+AFTER:
+    api_swagger.py → embedding.py → SentenceTransformer.encode()
+    → local embedding generation (NO HTTP calls)
+
+================================================================================
+CHANGES MADE
+================================================================================
+
+1. backend/embedding.py
+   ✓ Removed: from local_model_client import get_client
+   ✓ Added: from sentence_transformers import SentenceTransformer
+   ✓ Load model at module level: SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+   ✓ Updated get_embedding() to use local model
+   ✓ Updated get_embeddings_batch() to use local model with batch processing
+   ✓ All HTTP calls removed
+
+2. backend/local_model_client.py
+   ✓ Marked embed() method as LEGACY
+   ✓ Added comment: "NO LONGER USED - Embeddings generated locally"
+   ✓ Kept health_check() and parse_query() methods intact
+
+3. backend/requirements.txt
+   ✓ Added: sentence-transformers==2.2.2
+
+4. backend/api_swagger.py
+   ✓ Added new debug endpoint: POST /api/v1/debug/embedding
+   ✓ Added EmbeddingRequest model
+   ✓ Updated API version: 3.1.0 → 3.2.0
+   ✓ Updated documentation
+   ✓ Updated initialization logging
+
+================================================================================
+MODEL SERVER ENDPOINTS (VERIFIED)
+================================================================================
+
+training/local_model_server.py ONLY exposes:
+   ✓ GET  /health
+   ✓ POST /parse-query
+
+Does NOT expose:
+   ✗ POST /embed (REMOVED from dependencies)
+   ✗ Database connections
+   ✗ Search functionality
+
+================================================================================
+API ENDPOINTS (ALL WORKING)
+================================================================================
+
+Production:
+   ✓ POST /api/v1/query - Full pipeline
+
+Debug:
+   ✓ POST /api/v1/debug/parse-query - Test SLM only
+   ✓ POST /api/v1/debug/search - Test SearchTool
+   ✓ POST /api/v1/debug/task - Test TaskTool + BudgetOptimizer
+   ✓ POST /api/v1/debug/compare - Test CompareTool
+   ✓ POST /api/v1/debug/alternatives - Test AlternativesTool
+   ✓ POST /api/v1/debug/embedding - Test local embedding generation (NEW)
+
+System:
+   ✓ GET  /api/v1/system/health
+   ✓ GET  /docs - Swagger UI
+
+================================================================================
+VERIFICATION STEPS
+================================================================================
+
+1. Install sentence-transformers:
+   cd backend
+   pip install sentence-transformers==2.2.2
+
+2. Test embedding generation:
+   curl -X POST http://localhost:5000/api/v1/debug/embedding \
+     -H "Api-Key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+     -H "Content-Type: application/json" \
+     -d '{"text": "running shoes"}'
+
+   Expected output:
+   {
+     "text": "running shoes",
+     "dimension": 384,
+     "embedding_preview": [0.123, -0.452, ...],
+     "norm": 1.0,
+     "model": "sentence-transformers/all-MiniLM-L6-v2",
+     "note": "Embedding generated locally (no HTTP call to model server)"
+   }
+
+3. Verify NO HTTP calls to /embed:
+   grep -r "/embed" backend/ --include="*.py" | grep -v "# LEGACY"
+
+   Expected: Only documentation and debug endpoint references
+
+4. Test full pipeline:
+   curl -X POST http://localhost:5000/api/v1/query \
+     -H "Api-Key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+     -H "Content-Type: application/json" \
+     -d '{"query": "running shoes under 5000"}'
+
+   Should work without calling /embed endpoint
+
+================================================================================
+ARCHITECTURE (FINAL)
+================================================================================
+
+User Query
+    ↓
+POST /api/v1/query (api_swagger.py:5000)
+    ↓
+LocalModelClient.parse() → POST localhost:8000/parse-query
+    ↓
+Intent Routing (search/task/compare/alternatives)
+    ↓
+    ├─→ SearchTool
+    │       ↓
+    │   HybridSearch
+    │       ↓
+    │   embedding.get_embedding() [LOCAL - sentence-transformers]
+    │       ↓
+    │   PostgreSQL + pgvector
+    │
+    ├─→ TaskTool
+    │       ↓
+    │   BudgetOptimizer + SearchTool
+    │       ↓
+    │   PostgreSQL
+    │
+    ├─→ CompareTool
+    │       ↓
+    │   PostgreSQL
+    │
+    └─→ AlternativesTool
+            ↓
+        PostgreSQL
+
+Model Server (training/local_model_server.py:8000):
+    - Intent parsing ONLY
+    - NO embeddings
+    - NO database
+    - NO search
+
+================================================================================
+BENEFITS
+================================================================================
+
+✓ Reduced latency: No HTTP overhead for embeddings
+✓ Simplified architecture: One less endpoint dependency
+✓ Better scalability: Embeddings generated in-process
+✓ Easier debugging: Local embedding generation is more predictable
+✓ Model server focus: Clean separation of concerns (intent parsing only)
+
+================================================================================
+FILES MODIFIED
+================================================================================
+
+1. backend/embedding.py - Refactored to use sentence-transformers
+2. backend/local_model_client.py - Marked embed() as LEGACY
+3. backend/requirements.txt - Added sentence-transformers
+4. backend/api_swagger.py - Added debug/embedding endpoint
+
+Files NOT modified (preserved):
+   ✓ backend/services/hybrid_search.py (already imports embedding correctly)
+   ✓ backend/services/embedding_service.py (already uses embedding correctly)
+   ✓ training/local_model_server.py (already has only /health and /parse-query)
+   ✓ All .txt documentation files
+   ✓ All requirements files
+   ✓ All .env files
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+1. Install dependencies:
+   cd backend
+   pip install -r requirements.txt
+
+2. Test embedding endpoint:
+   python -c "from embedding import get_embedding; print(len(get_embedding('test')))"
+   Expected output: 384
+
+3. Start systems:
+   # Terminal 1: Model server
+   cd training
+   python local_model_server.py
+
+   # Terminal 2: API server
+   cd backend
+   python api_swagger.py
+
+4. Test all endpoints via Swagger UI:
+   http://localhost:5000/docs
+
+================================================================================

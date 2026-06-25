@@ -1,0 +1,212 @@
+QUICK START GUIDE
+=================
+
+Get the Decathlon Smart Shopping API running in 3 steps.
+
+
+STEP 1: Train the Model (One-Time Setup)
+=========================================
+
+cd training
+./setup_mlx.sh
+source venv_mlx/bin/activate
+python3 train_mlx.py --mode train --iters 300
+
+Time: ~15 minutes on Apple Silicon
+Output: training/outputs/qwen3_4b_lora_mlx/
+
+
+STEP 2: Start the System
+=========================
+
+./start_system.sh
+
+This starts:
+  • Local Model Server (port 8000) - Qwen3-4B intent parser
+  • Backend API (port 5000) - Main API
+
+Wait for:
+  ✅ SYSTEM READY
+
+
+STEP 3: Test the API
+=====================
+
+Option A: Use the test script
+------------------------------
+./test_new_api.sh
+
+
+Option B: Manual curl
+---------------------
+curl -X POST http://localhost:5000/api/v1/query \
+  -H "Api-Key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"running shoes under 5000"}'
+
+
+Option C: Swagger UI
+--------------------
+Open in browser:
+http://localhost:5000/docs
+
+
+EXAMPLE QUERIES
+===============
+
+Search:
+  "running shoes under 5000"
+  "waterproof hiking shoes"
+  "football boots for men"
+
+Task:
+  "I want to start playing golf"
+  "golf equipment under 15000"
+  "camping gear"
+
+Compare:
+  "compare MH500 and NH500"
+
+Alternatives:
+  "alternatives to MH500"
+
+
+TROUBLESHOOTING
+===============
+
+Problem: Model server not responding
+Solution:
+  cd training
+  source venv_mlx/bin/activate
+  python3 local_model_server.py
+  # Wait for "Model loaded successfully"
+
+Problem: Database connection failed
+Solution:
+  # Check PostgreSQL is running
+  psql -h localhost -U postgres -d decathlon_rag -c "SELECT 1"
+  
+  # Check backend/.env has correct credentials
+
+Problem: Port already in use
+Solution:
+  # Kill existing processes
+  lsof -ti:5000 | xargs kill
+  lsof -ti:8000 | xargs kill
+  
+  # Then restart
+  ./start_system.sh
+
+
+ARCHITECTURE
+============
+
+User
+  ↓
+api_swagger.py (Flask, port 5000)
+  ↓ HTTP POST /parse-query
+local_model_server.py (FastAPI, port 8000)
+  ↓ Qwen3-4B + LoRA
+Intent JSON {"intent": "search", ...}
+  ↓
+SearchTool / TaskTool / CompareTool / AlternativesTool
+  ↓
+PostgreSQL + pgvector
+  ↓
+Results
+
+
+API ENDPOINTS
+=============
+
+POST /api/v1/query
+  Request: {"query": "running shoes under 5000"}
+  Response: {"type": "search", "products": [...], "total": 10}
+
+GET /api/v1/system/health
+  Response: {"status": "healthy", "model_server": "connected", ...}
+
+GET /docs
+  Swagger UI (interactive documentation)
+
+
+FILES TO KNOW
+=============
+
+Start here:
+  start_system.sh           - Start everything
+  test_new_api.sh          - Test the API
+  README.md                 - Full documentation
+  ARCHITECTURE.txt          - Detailed architecture
+
+Backend:
+  backend/api_swagger.py    - Main API (ENTRY POINT)
+  backend/database.py       - Database connections
+  backend/.env              - Configuration
+
+Model:
+  training/local_model_server.py  - Intent parser (ENTRY POINT)
+  training/train_mlx.py           - Training script
+  training/data/train.jsonl       - Training data
+
+Tools:
+  backend/tools/search_tool.py       - Product search
+  backend/tools/task_tool.py         - Activity shopping
+  backend/tools/compare_tool.py      - Product comparison
+  backend/tools/alternatives_tool.py - Similar products
+
+
+CONFIGURATION
+=============
+
+backend/.env:
+  API_KEY=decathlon_smart_search_2024_secure_key_abc123xyz
+  LOCAL_MODEL_URL=http://localhost:8000
+  POSTGRES_HOST=localhost
+  POSTGRES_PORT=5432
+  POSTGRES_DB=decathlon_rag
+  POSTGRES_USER=postgres
+  POSTGRES_PASSWORD=your_password
+
+
+DEPLOYMENT
+==========
+
+Development (Mac):
+  ./start_system.sh
+
+Production (Split):
+  Render: api_swagger.py (~200 MB RAM)
+  Mac: local_model_server.py (~2 GB RAM)
+  Connect: ngrok → Set LOCAL_MODEL_URL in Render
+
+
+NEXT STEPS
+==========
+
+1. ✅ Train model (if not done)
+2. ✅ Start system: ./start_system.sh
+3. ✅ Test API: ./test_new_api.sh
+4. ✅ Open Swagger: http://localhost:5000/docs
+5. ✅ Read README.md for details
+6. ✅ Read ARCHITECTURE.txt for deep dive
+
+
+SUPPORT
+=======
+
+Logs:
+  Backend API logs appear in terminal where you ran start_system.sh
+  Model server logs appear in same terminal
+
+Health check:
+  curl http://localhost:5000/api/v1/system/health
+
+Model server health:
+  curl http://localhost:8000/health
+
+Database check:
+  psql -h localhost -U postgres -d decathlon_rag -c "\dt"
+
+
+That's it! You're ready to go. 🚀

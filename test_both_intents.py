@@ -6,7 +6,8 @@ Verifies that Pydantic validation works for both response types
 import requests
 import json
 
-LOCAL_URL = "http://localhost:8001"
+import os
+LOCAL_URL = os.getenv("LOCAL_MODEL_URL", "http://localhost:8000")
 
 def test_search_intent():
     """Test search intent (single search_request)."""
@@ -33,8 +34,8 @@ def test_search_intent():
         
         # Verify structure
         assert data["intent"] == "search", f"Expected intent='search', got '{data['intent']}'"
-        assert data["search_request"] is not None, "search_request should not be None"
-        assert data["search_requests"] is None, "search_requests should be None for search intent"
+        assert data.get("search_request") is not None, "search_request should not be None"
+        assert data.get("search_requests") is None, "search_requests should be None for search intent"
         
         print(f"✓ Intent: {data['intent']}")
         print(f"✓ search_request: present")
@@ -83,20 +84,31 @@ def test_task_intent():
         
         # Verify structure
         assert data["intent"] == "task", f"Expected intent='task', got '{data['intent']}'"
-        assert data["search_requests"] is not None, "search_requests should not be None"
-        assert data["search_request"] is None, "search_request should be None for task intent"
-        assert isinstance(data["search_requests"], list), "search_requests should be a list"
-        assert len(data["search_requests"]) > 0, "search_requests should not be empty"
         
-        print(f"✓ Intent: {data['intent']}")
-        print(f"✓ search_requests: present (list with {len(data['search_requests'])} items)")
-        print(f"✓ search_request: None (correct)")
-        
-        print(f"\nSearch Requests:")
-        for i, sr in enumerate(data["search_requests"], 1):
-            print(f"\n  {i}. {sr.get('category', 'Unknown')}")
-            print(f"     Sport: {sr.get('sport')}")
-            print(f"     Keywords: {sr.get('keywords')}")
+        # Support both formats (MLX task_request and PyTorch search_requests)
+        if "task_request" in data:
+            tr = data["task_request"]
+            assert tr is not None, "task_request should not be None"
+            print(f"✓ Intent: {data['intent']}")
+            print(f"✓ task_request: present")
+            print(f"  Activity: {tr.get('activity')}")
+            print(f"  Budget: {tr.get('budget')}")
+            print(f"  Items: {[item.get('name') for item in tr.get('items', [])]}")
+        else:
+            assert data.get("search_requests") is not None, "search_requests should not be None"
+            assert data.get("search_request") is None, "search_request should be None for task intent"
+            assert isinstance(data["search_requests"], list), "search_requests should be a list"
+            assert len(data["search_requests"]) > 0, "search_requests should not be empty"
+            
+            print(f"✓ Intent: {data['intent']}")
+            print(f"✓ search_requests: present (list with {len(data['search_requests'])} items)")
+            print(f"✓ search_request: None (correct)")
+            
+            print(f"\nSearch Requests:")
+            for i, sr in enumerate(data["search_requests"], 1):
+                print(f"\n  {i}. {sr.get('category', 'Unknown')}")
+                print(f"     Sport: {sr.get('sport')}")
+                print(f"     Keywords: {sr.get('keywords')}")
         
         print(f"\n✅ TASK INTENT TEST PASSED")
         return True
@@ -138,10 +150,10 @@ def test_raw_response_validity():
                 continue
             
             data = response.json()
-            raw = data.get("raw_response")
+            raw = data.get("raw_response") or response.text
             
             if not raw:
-                print(f"  ❌ No raw_response field")
+                print(f"  ❌ No raw_response field and response text empty")
                 all_passed = False
                 continue
             

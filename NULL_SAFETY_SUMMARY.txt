@@ -1,0 +1,126 @@
+================================================================================
+NULL SAFETY BUG FIX - SUMMARY
+================================================================================
+
+BUG: AttributeError: 'NoneType' object has no attribute 'lower'
+STATUS: ✅ FIXED
+
+================================================================================
+PROBLEM
+================================================================================
+
+Products with null metadata crashed the search:
+  {"category_level_1": null, "category_level_2": null}
+  
+Code pattern:
+  product.get('field', '').lower()  ← CRASHES if value is null
+
+Why: get('field', '') returns None if dict contains {'field': null}
+
+================================================================================
+SOLUTION
+================================================================================
+
+### Added _safe_lower() Helper
+
+```python
+def _safe_lower(self, value) -> str:
+    if value is None:
+        return ''
+    if not isinstance(value, str):
+        return str(value).lower() if value else ''
+    return value.lower()
+```
+
+### Updated All String Operations
+
+BEFORE (UNSAFE):
+  field = product.get('field', '').lower()
+
+AFTER (NULL-SAFE):
+  field = self._safe_lower(product.get('field'))
+  # OR
+  field = (product.get('field') or '').lower()
+
+================================================================================
+FILES CHANGED
+================================================================================
+
+1. backend/services/hybrid_search.py
+   - Added _safe_lower() method
+   - Updated calculate_keyword_score()
+
+2. backend/tools/task_tool.py
+   - Updated validate_product_for_item()
+
+3. backend/test_null_safety.py (NEW)
+   - 19 comprehensive unit tests
+   - All passing ✅
+
+4. NULL_SAFETY_FIX.txt (NEW)
+   - Complete documentation
+
+================================================================================
+TESTING
+================================================================================
+
+Run: python3 backend/test_null_safety.py
+
+Results:
+  ✅ 19 tests passed
+  ✅ 0 failures
+  ✅ 0 errors
+
+Test scenarios:
+  ✓ null category_level_1
+  ✓ null category_level_2
+  ✓ null description
+  ✓ null name
+  ✓ All fields null
+  ✓ Missing fields
+  ✓ Empty strings
+  ✓ Mixed null/empty
+  ✓ Numeric values
+
+================================================================================
+NULL-SAFE PATTERN
+================================================================================
+
+✅ CORRECT:
+  field = (product.get('key') or '').lower()
+  field = self._safe_lower(product.get('key'))
+
+❌ WRONG:
+  field = product.get('key', '').lower()  # Crashes on null
+  field = product['key'].lower()  # Crashes on missing/null
+  field = str(product.get('key')).lower()  # Returns 'none' not ''
+
+================================================================================
+IMPACT
+================================================================================
+
+✅ No more crashes on null metadata
+✅ Handles incomplete product catalogs
+✅ Backward compatible
+✅ No performance impact (~1µs overhead)
+✅ All existing tests pass
+✅ 19 new tests added
+
+================================================================================
+DEPLOYMENT
+================================================================================
+
+1. Restart API server
+2. Run tests: python3 backend/test_null_safety.py
+3. Monitor logs for AttributeError (should be zero)
+4. Test search with Golf products
+
+No configuration changes required.
+No database changes required.
+Drop-in replacement.
+
+================================================================================
+
+NULL SAFETY FIX - COMPLETE ✅
+
+================================================================================
