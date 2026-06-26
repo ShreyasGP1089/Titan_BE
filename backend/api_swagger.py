@@ -20,6 +20,7 @@ from functools import wraps
 from database import initialize_pool, close_pool
 import atexit
 from dotenv import load_dotenv
+import uuid
 
 # Import Tools
 from tools.search_tool import SearchTool
@@ -59,12 +60,13 @@ class LocalModelClient:
         self.timeout = timeout
         logger.info(f"LocalModelClient initialized: {self.base_url}")
     
-    def parse(self, query: str) -> dict:
+    def parse(self, query: str, request_id: str = None) -> dict:
         """
         Parse natural language query into structured JSON.
         
         Args:
             query: Natural language query
+            request_id: Unique request ID for tracking
         
         Returns:
             Structured JSON dict with intent and parameters
@@ -75,7 +77,7 @@ class LocalModelClient:
             ValueError: If response is invalid JSON
         """
         try:
-            logger.info(f"Parsing query: {query}")
+            logger.info(f"[{request_id}] Parsing query: {query}")
             
             # Call local model server
             response = requests.post(
@@ -92,7 +94,7 @@ class LocalModelClient:
             # Parse JSON
             result = response.json()
             
-            logger.info(f"✓ Parsed intent: {result.get('intent')}")
+            logger.info(f"[{request_id}] ✓ Parsed intent: {result.get('intent')}")
             
             return result
             
@@ -159,7 +161,6 @@ api = Api(
         POST /api/v1/debug/task - Test TaskTool directly
         POST /api/v1/debug/compare - Test CompareTool directly
         POST /api/v1/debug/alternatives - Test AlternativesTool directly
-        POST /api/v1/debug/embedding - Test local embedding generation
     
     **Architecture:**
         User → /api/v1/query → Local Model Server → Tools → PostgreSQL
@@ -232,7 +233,6 @@ def initialize():
         logger.info("  POST /api/v1/debug/task")
         logger.info("  POST /api/v1/debug/compare")
         logger.info("  POST /api/v1/debug/alternatives")
-        logger.info("  POST /api/v1/debug/embedding")
         logger.info("")
         logger.info("System:")
         logger.info("  GET  /api/v1/system/health")
@@ -290,10 +290,6 @@ alternatives_request = api.model('AlternativesRequest', {
     'product': fields.String(required=True, description='Product ID', example='MH500')
 })
 
-embedding_request = api.model('EmbeddingRequest', {
-    'text': fields.String(required=True, description='Text to embed', example='running shoes')
-})
-
 
 # ============================================================================
 # ENDPOINTS
@@ -325,6 +321,9 @@ class QueryEndpoint(Resource):
         # Initialize
         initialize()
         
+        # Generate unique request ID for tracking
+        request_id = str(uuid.uuid4())[:8]
+        
         try:
             data = request.get_json()
             
@@ -342,7 +341,10 @@ class QueryEndpoint(Resource):
                     'message': 'Query cannot be empty'
                 }, 400
             
-            logger.info(f"Processing query: {user_query}")
+            logger.info("=" * 80)
+            logger.info(f"[REQUEST {request_id}] NEW REQUEST")
+            logger.info(f"[REQUEST {request_id}] Query: {user_query}")
+            logger.info("=" * 80)
             
             # Step 1: Parse query with local model server or intercept compare queries
             parsed = None
@@ -389,7 +391,9 @@ class QueryEndpoint(Resource):
             
             if not parsed:
                 try:
-                    parsed = model_client.parse(user_query)
+                    logger.info(f"[REQUEST {request_id}] Calling /parse-query endpoint")
+                    parsed = model_client.parse(user_query, request_id=request_id)
+                    logger.info(f"[REQUEST {request_id}] Received parsed intent: {parsed.get('intent')}")
                 except ConnectionError as e:
                     return {
                         'error': 'Service Unavailable',
@@ -414,17 +418,20 @@ class QueryEndpoint(Resource):
                     'message': 'Invalid response from model server (missing intent)'
                 }, 400
             
-            logger.info(f"Intent: {intent}")
+            logger.info(f"[REQUEST {request_id}] Intent: {intent}")
             
             # Step 2: Route to appropriate tool
             try:
                 if intent == 'search':
                     from models.schemas import SearchRequest
+                    logger.info(f"[REQUEST {request_id}] Executing SearchTool")
                     search_request = SearchRequest(**parsed['search_request'])
                     result = search_tool.execute(search_request)
+                    logger.info(f"[REQUEST {request_id}] SearchTool completed")
                     
                 elif intent == 'task':
                     from models.schemas import TaskArguments
+                    logger.info(f"[REQUEST {request_id}] Executing TaskTool")
                     logger.info("=" * 80)
                     logger.info(f"PARSED OUTPUT: {parsed}")
                     logger.info("=" * 80)
@@ -435,20 +442,25 @@ class QueryEndpoint(Resource):
                         query=user_query
                     )
                     result = task_tool.execute(task_arguments)
+                    logger.info(f"[REQUEST {request_id}] TaskTool completed")
                     
                 elif intent == 'compare':
                     from models.schemas import CompareArguments
+                    logger.info(f"[REQUEST {request_id}] Executing CompareTool")
                     compare_arguments = CompareArguments(**parsed['arguments'])
                     result = compare_tool.execute(compare_arguments)
+                    logger.info(f"[REQUEST {request_id}] CompareTool completed")
                     
                 elif intent == 'alternatives':
                     from models.schemas import AlternativesArguments
+                    logger.info(f"[REQUEST {request_id}] Executing AlternativesTool")
                     alt_data = parsed.get("arguments") or {}
                     alternatives_arguments = AlternativesArguments(
                         product=alt_data.get("product"),
                         query=user_query
                     )
                     result = alternatives_tool.execute(alternatives_arguments)
+                    logger.info(f"[REQUEST {request_id}] AlternativesTool completed")
                 
                 else:
                     return {
@@ -460,7 +472,9 @@ class QueryEndpoint(Resource):
                 response = result.dict()
                 response['query'] = user_query
                 
-                logger.info(f"✓ Query processed successfully")
+                logger.info("=" * 80)
+                logger.info(f"[REQUEST {request_id}] ✅ REQUEST COMPLETE")
+                logger.info("=" * 80)
                 
                 return response, 200
                 
@@ -883,70 +897,6 @@ class AlternativesDebugEndpoint(Resource):
             return {'error': 'Validation error', 'message': str(e)}, 400
         except Exception as e:
             logger.error(f"[DEBUG] AlternativesTool error: {e}")
-            logger.error(traceback.format_exc())
-            return {'error': str(e)}, 500
-
-
-@ns_debug.route('/embedding')
-class EmbeddingDebugEndpoint(Resource):
-    """Debug endpoint: Test local embedding generation"""
-    
-    @api.doc('embedding_debug')
-    @api.expect(embedding_request)
-    @api.response(200, 'Success')
-    @require_api_key
-    def post(self):
-        """
-        Generate embedding for text (debug)
-        
-        Tests local sentence-transformers embedding generation.
-        NO HTTP calls to model server.
-        
-        Useful for testing:
-        - Embedding service functionality
-        - Embedding dimensions (384)
-        - Vector normalization
-        """
-        initialize()
-        
-        try:
-            data = request.get_json()
-            
-            if not data or 'text' not in data:
-                return {'error': 'Text field required'}, 400
-            
-            text = data['text'].strip()
-            
-            if not text:
-                return {'error': 'Text cannot be empty'}, 400
-            
-            logger.info(f"[DEBUG] Generating embedding for: {text}")
-            
-            # Import embedding module
-            from embedding import get_embedding
-            
-            # Generate embedding
-            embedding = get_embedding(text)
-            
-            # Calculate norm to verify normalization
-            import numpy as np
-            norm = float(np.linalg.norm(embedding))
-            
-            logger.info(f"[DEBUG] ✓ Embedding generated")
-            logger.info(f"[DEBUG]   Dimension: {len(embedding)}")
-            logger.info(f"[DEBUG]   Norm: {norm:.6f}")
-            
-            return {
-                'text': text,
-                'dimension': len(embedding),
-                'embedding_preview': embedding[:10],  # First 10 values
-                'norm': norm,
-                'model': 'sentence-transformers/all-MiniLM-L6-v2',
-                'note': 'Embedding generated locally (no HTTP call to model server)'
-            }, 200
-            
-        except Exception as e:
-            logger.error(f"[DEBUG] Embedding error: {e}")
             logger.error(traceback.format_exc())
             return {'error': str(e)}, 500
 
