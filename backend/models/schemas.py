@@ -105,8 +105,10 @@ class Product(BaseModel):
 class SearchResponse(BaseModel):
     """Search tool response"""
     type: Literal["search"] = "search"
-    products: List[Product]
-    total: int
+    products: List[Product]  # RELEVANT products only
+    related: List[Product] = Field(default_factory=list)  # RELATED products
+    total: int  # Count of RELEVANT products
+    related_total: int = 0  # Count of RELATED products
     query: SearchRequest
 
 
@@ -137,10 +139,20 @@ class TaskResponse(BaseModel):
     query: Optional[str] = None
 
 
+class ComparisonSummary(BaseModel):
+    """AI-generated comparison summary"""
+    summary: str
+    key_differences: List[str]
+    best_for: dict
+
+
 class CompareResponse(BaseModel):
     """Compare tool response"""
     type: Literal["compare"] = "compare"
     products: List[Product]
+    missing_products: List[str] = Field(default_factory=list)  # Products that couldn't be resolved
+    message: Optional[str] = None  # Error message if any products missing
+    comparison: Optional[ComparisonSummary] = None  # AI-generated comparison summary
 
 
 class AlternativesResponse(BaseModel):

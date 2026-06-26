@@ -239,7 +239,10 @@ class TaskTool:
         activity = arguments.activity
         budget = arguments.budget
         
-        logger.info(f"Executing task: activity={activity}, budget={budget}")
+        logger.info("=" * 80)
+        logger.info(f"TASKTOOL EXECUTION START")
+        logger.info(f"Activity: {activity}, Budget: {budget}")
+        logger.info("=" * 80)
         
         # Get task definition
         if activity not in TASKS:
@@ -255,7 +258,11 @@ class TaskTool:
         items = []
         all_products = {}
         
-        for item_def in task_definition:
+        logger.info(f"Searching for {len(task_definition)} items:")
+        for idx, item_def in enumerate(task_definition, 1):
+            logger.info(f"  {idx}. {item_def['name']}")
+        
+        for item_index, item_def in enumerate(task_definition, 1):
             item_name = item_def["name"]
             mandatory = item_def["mandatory"]
             keywords = item_def["keywords"]
@@ -264,10 +271,13 @@ class TaskTool:
             sport = item_def.get("sport", activity)
             category = item_def.get("category")
             
-            logger.info(f"Searching for: {item_name} (mandatory={mandatory})")
+            logger.info("-" * 80)
+            logger.info(f"ITEM {item_index}/{len(task_definition)}: {item_name}")
+            logger.info(f"  Mandatory: {mandatory}")
             logger.info(f"  Keywords: {keywords}")
             logger.info(f"  Validation: {validation_keywords}")
             logger.info(f"  Negative: {negative_keywords}")
+            logger.info("-" * 80)
             
             # Search products — get top 20 for a richer candidate pool
             # Profile scoring needs enough candidates to re-rank (e.g., kids products
@@ -277,7 +287,8 @@ class TaskTool:
                 category_level_1=category,
                 keywords=keywords,
                 price_limit=budget,  # Pre-filter by budget if set
-                top_k=20
+                top_k=20,
+                return_format='flat'  # Backward compatibility: get flat list of RELEVANT products only
             )
             
             # Validate products - filter out mismatches
@@ -319,6 +330,12 @@ class TaskTool:
                 products=product_objects
             )
             items.append(task_item)
+            
+            logger.info(f"✓ Item '{item_name}' search complete")
+        
+        logger.info("=" * 80)
+        logger.info("ALL ITEM SEARCHES COMPLETE")
+        logger.info("=" * 80)
         
         # If budget exists, optimize
         total_cost = None
@@ -359,6 +376,9 @@ class TaskTool:
             query=arguments.query,
         )
         
-        logger.info(f"Task returned {len(items)} items")
+        logger.info("=" * 80)
+        logger.info(f"TASKTOOL EXECUTION COMPLETE")
+        logger.info(f"Returned {len(items)} items")
+        logger.info("=" * 80)
         
         return response

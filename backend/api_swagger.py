@@ -20,6 +20,7 @@ from functools import wraps
 from database import initialize_pool, close_pool
 import atexit
 from dotenv import load_dotenv
+import uuid
 
 # Import Tools
 from tools.search_tool import SearchTool
@@ -59,12 +60,13 @@ class LocalModelClient:
         self.timeout = timeout
         logger.info(f"LocalModelClient initialized: {self.base_url}")
     
-    def parse(self, query: str) -> dict:
+    def parse(self, query: str, request_id: str = None) -> dict:
         """
         Parse natural language query into structured JSON.
         
         Args:
             query: Natural language query
+            request_id: Unique request ID for tracking
         
         Returns:
             Structured JSON dict with intent and parameters
@@ -75,7 +77,7 @@ class LocalModelClient:
             ValueError: If response is invalid JSON
         """
         try:
-            logger.info(f"Parsing query: {query}")
+            logger.info(f"[{request_id}] Parsing query: {query}")
             
             # Call local model server
             response = requests.post(
@@ -92,7 +94,7 @@ class LocalModelClient:
             # Parse JSON
             result = response.json()
             
-            logger.info(f"✓ Parsed intent: {result.get('intent')}")
+            logger.info(f"[{request_id}] ✓ Parsed intent: {result.get('intent')}")
             
             return result
             
@@ -319,6 +321,9 @@ class QueryEndpoint(Resource):
         # Initialize
         initialize()
         
+        # Generate unique request ID for tracking
+        request_id = str(uuid.uuid4())[:8]
+        
         try:
             data = request.get_json()
             
@@ -336,7 +341,10 @@ class QueryEndpoint(Resource):
                     'message': 'Query cannot be empty'
                 }, 400
             
-            logger.info(f"Processing query: {user_query}")
+            logger.info("=" * 80)
+            logger.info(f"[REQUEST {request_id}] NEW REQUEST")
+            logger.info(f"[REQUEST {request_id}] Query: {user_query}")
+            logger.info("=" * 80)
             
             # Step 1: Parse query with local model server or intercept compare queries
             parsed = None
@@ -383,7 +391,9 @@ class QueryEndpoint(Resource):
             
             if not parsed:
                 try:
-                    parsed = model_client.parse(user_query)
+                    logger.info(f"[REQUEST {request_id}] Calling /parse-query endpoint")
+                    parsed = model_client.parse(user_query, request_id=request_id)
+                    logger.info(f"[REQUEST {request_id}] Received parsed intent: {parsed.get('intent')}")
                 except ConnectionError as e:
                     return {
                         'error': 'Service Unavailable',
@@ -408,17 +418,20 @@ class QueryEndpoint(Resource):
                     'message': 'Invalid response from model server (missing intent)'
                 }, 400
             
-            logger.info(f"Intent: {intent}")
+            logger.info(f"[REQUEST {request_id}] Intent: {intent}")
             
             # Step 2: Route to appropriate tool
             try:
                 if intent == 'search':
                     from models.schemas import SearchRequest
+                    logger.info(f"[REQUEST {request_id}] Executing SearchTool")
                     search_request = SearchRequest(**parsed['search_request'])
                     result = search_tool.execute(search_request)
+                    logger.info(f"[REQUEST {request_id}] SearchTool completed")
                     
                 elif intent == 'task':
                     from models.schemas import TaskArguments
+                    logger.info(f"[REQUEST {request_id}] Executing TaskTool")
                     logger.info("=" * 80)
                     logger.info(f"PARSED OUTPUT: {parsed}")
                     logger.info("=" * 80)
@@ -429,20 +442,25 @@ class QueryEndpoint(Resource):
                         query=user_query
                     )
                     result = task_tool.execute(task_arguments)
+                    logger.info(f"[REQUEST {request_id}] TaskTool completed")
                     
                 elif intent == 'compare':
                     from models.schemas import CompareArguments
+                    logger.info(f"[REQUEST {request_id}] Executing CompareTool")
                     compare_arguments = CompareArguments(**parsed['arguments'])
                     result = compare_tool.execute(compare_arguments)
+                    logger.info(f"[REQUEST {request_id}] CompareTool completed")
                     
                 elif intent == 'alternatives':
                     from models.schemas import AlternativesArguments
+                    logger.info(f"[REQUEST {request_id}] Executing AlternativesTool")
                     alt_data = parsed.get("arguments") or {}
                     alternatives_arguments = AlternativesArguments(
                         product=alt_data.get("product"),
                         query=user_query
                     )
                     result = alternatives_tool.execute(alternatives_arguments)
+                    logger.info(f"[REQUEST {request_id}] AlternativesTool completed")
                 
                 else:
                     return {
@@ -454,7 +472,9 @@ class QueryEndpoint(Resource):
                 response = result.dict()
                 response['query'] = user_query
                 
-                logger.info(f"✓ Query processed successfully")
+                logger.info("=" * 80)
+                logger.info(f"[REQUEST {request_id}] ✅ REQUEST COMPLETE")
+                logger.info("=" * 80)
                 
                 return response, 200
                 

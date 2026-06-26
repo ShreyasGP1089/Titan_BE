@@ -2,19 +2,33 @@
 Hybrid Search Service
 TRUE Hybrid Search: Combines keyword matching scores with semantic similarity
 
+Architecture (High-Recall Retrieval Pipeline):
+    User Query
+    ↓
+    Intent Parser (external - not modified here)
+    ↓
+    Broad SQL Candidate Generation (High Recall)
+    ↓
+    Semantic Ranking (pgvector)
+    ↓
+    LLM Validation (High Precision)
+    ↓
+    Final Results
+
 Scoring Formula:
     final_score = (semantic_score * 0.6) + (keyword_score * 0.4)
 
 Keyword Scoring Priority:
-    - Description Match: 1.0 (highest priority)
-    - Product Name Match: 0.8
+    - Product Name Match: 1.0 (highest priority)
     - Exact Match Boost: +0.2
+    - Description Match: 0.3
     - All Keywords Match Bonus: +0.3
 
-This prevents accessories/apparel from ranking above actual equipment.
+SQL is responsible ONLY for broad candidate generation.
+Precision filtering is handled by semantic ranking and the LLM validator.
 """
 import logging
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Union
 from decimal import Decimal
 from psycopg2.extras import RealDictCursor
 from database import connect_db, release_connection
@@ -40,8 +54,10 @@ class HybridSearchService:
     True Hybrid Search Service
     
     Combines:
-    1. Keyword Scoring (name, description matching with word-boundary regex)
-    2. Semantic Scoring (vector similarity)
+    1. Broad SQL Candidate Generation (high recall)
+    2. Keyword Scoring (name, description matching)
+    3. Semantic Scoring (vector similarity)
+    4. LLM Validation (high precision)
     
     Final Score = 0.6 * semantic + 0.4 * keyword
     """
@@ -55,38 +71,13 @@ class HybridSearchService:
     DESCRIPTION_MATCH_SCORE = 0.3  # Lowest priority
     EXACT_MATCH_BOOST = 0.2     # Bonus for exact word match
     
-    KNOWN_PRODUCT_TYPES = {
-        'glove', 'gloves', 'backpack', 'backpacks', 'bottle', 'bottles', 'tent', 'tents', 
-        'football', 'footballs', 'helmet', 'helmets', 'racket', 'rackets', 'shoe', 'shoes', 
-        'sock', 'socks', 'trouser', 'trousers', 'short', 'shorts', 'jacket', 'jackets', 
-        'ball', 'balls', 'mat', 'mats', 'bag', 'bags', 'pole', 'poles', 'watch', 'watches', 
-        'cap', 'caps', 'goggle', 'goggles', 'swimsuit', 'swimsuits', 'jersey', 'jerseys', 
-        'shirt', 'shirts', 'guard', 'guards', 'block', 'blocks', 'strap', 'straps', 
-        'chair', 'chairs', 'stove', 'stoves', 'lamp', 'lamps'
-    }
-    
-    EXCLUDED_MODIFIERS = {
-        'cover', 'covers', 'bag', 'bags', 'holder', 'holders', 'net', 'nets', 
-        'pump', 'pumps', 'whistle', 'whistles', 'card', 'cards', 'armband', 'armbands', 
-        'bib', 'bibs', 'ladder', 'ladders', 'warmer', 'warmers', 'tights', 'goal', 'goals', 
-        'guard', 'guards', 'pads', 'pad', 'strap', 'straps', 'cleaning', 'brush', 'brushes',
-        'jersey', 'jerseys', 'shirt', 'shirts', 'short', 'shorts', 'jacket', 'jackets',
-        'socks', 'sock', 'trouser', 'trousers', 'cap', 'caps', 'goggle', 'goggles',
-        'swimsuit', 'swimsuits', 'helmet', 'helmets', 'racket', 'rackets', 'cone', 'cones',
-        'marker', 'markers', 'saucer', 'saucers', 'needle', 'needles', 'referee',
-        'capacity', 'sleeve', 'sleeves'
-    }
-    
-    BROAD_QUERY_MODIFIERS = {
-        'gear', 'equipment', 'products', 'accessories', 'kit', 'kits'
-    }
-    
     def __init__(self):
         self.embedding_service = EmbeddingService()
         self.validation_service = ProductValidationService()
         
-    def _get_product_type_variations(self, product_type: str) -> List[str]:
-        w = product_type.lower()
+    def _get_variations(self, word: str) -> List[str]:
+        """Generate singular/plural variations of a word."""
+        w = word.lower()
         vars = [w]
         if w.endswith('s') and len(w) > 3:
             vars.append(w[:-1])
@@ -96,95 +87,6 @@ class HybridSearchService:
             vars.append(w + 's')
             vars.append(w + 'es')
         return list(set(vars))
-        
-    def _matches_product_type(self, name: str, description: str, requested_types: List[str], category_level_1: str = '', category_level_2: str = '') -> bool:
-        if not requested_types:
-            return True
-        name_lower = name.lower() if name else ""
-        desc_lower = description.lower() if description else ""
-        cat1_lower = category_level_1.lower() if category_level_1 else ""
-        cat2_lower = category_level_2.lower() if category_level_2 else ""
-        
-        # 1. First check presence of the product type in name or matching category fields (not solely description)
-        has_presence = False
-        for p_type in requested_types:
-            variations = self._get_product_type_variations(p_type)
-            if any(var in name_lower or var in cat1_lower or var in cat2_lower for var in variations):
-                has_presence = True
-                break
-                
-        if not has_presence:
-            return False
-            
-        # 2. Dynamic check for pre-modifier relation phrases:
-        # e.g., "for [product_type]", "fits inside [product_type]", "compatible with [product_type]"
-        for p_type in requested_types:
-            variations = self._get_product_type_variations(p_type)
-            for var in variations:
-                for prefix in ['for ', 'fits inside ', 'fits in ', 'inside ', 'compatible with ', 'protection for ', 'to protect ', 'suitable for ', 'designed for ']:
-                    if prefix + var in name_lower:
-                        logger.info(f"Excluding '{name}' because it contains '{prefix + var}' (pre-modifier phrase relationship)")
-                        return False
-
-        # 3. Preposition/context-aware check for exclusion modifiers
-        # If any word in name is an exclusion modifier, it must be preceded by an accessory-introducing word ('with', 'including', 'and', '+')
-        name_words = [w.strip('.,()[]-+*#') for w in name_lower.split()]
-        name_words = [w for w in name_words if w]
-        
-        active_exclusions = self.EXCLUDED_MODIFIERS.copy()
-        for p_type in requested_types:
-            variations = self._get_product_type_variations(p_type)
-            for var in variations:
-                active_exclusions.discard(var)
-                
-        # Backpack-specific: discard 'bag'/'bags' because "backpack bag" is a common valid name
-        if any(pt in ['backpack', 'backpacks'] for pt in requested_types):
-            active_exclusions.discard('bag')
-            active_exclusions.discard('bags')
-            
-        # Excluded items that are allowed to be bundled as physical accessories
-        ALLOW_ACCESSORIES = {
-            'cover', 'covers', 'holder', 'holders', 'net', 'nets', 'whistle', 'whistles', 
-            'card', 'cards', 'strap', 'straps', 'brush', 'brushes', 'needle', 'needles'
-        }
-                
-        # Check each word
-        for i, word in enumerate(name_words):
-            if word in active_exclusions:
-                is_accessory = False
-                if word in ALLOW_ACCESSORIES:
-                    lookback_range = range(max(0, i-3), i)
-                    for j in lookback_range:
-                        if name_words[j] in ['with', 'including', 'and', '+']:
-                            is_accessory = True
-                            break
-                if not is_accessory:
-                    logger.info(f"Excluding '{name}' because word '{word}' is not introduced as an accessory (no 'with'/'including'/'and' preceding it)")
-                    return False
-                    
-        # 4. Standard head-noun post-modifier rejection on the product name
-        last_match_idx = -1
-        for i, word in enumerate(name_words):
-            for p_type in requested_types:
-                variations = self._get_product_type_variations(p_type)
-                if any(var == word or (len(word) > len(var) and word.startswith(var)) for var in variations):
-                    last_match_idx = i
-                    
-        if last_match_idx != -1:
-            for i, word in enumerate(name_words[last_match_idx + 1:], start=last_match_idx + 1):
-                if word in active_exclusions:
-                    is_accessory = False
-                    if word in ALLOW_ACCESSORIES:
-                        lookback_range = range(max(0, i-3), i)
-                        for j in lookback_range:
-                            if name_words[j] in ['with', 'including', 'and', '+']:
-                                is_accessory = True
-                                break
-                    if not is_accessory:
-                        logger.info(f"Excluding '{name}' because it is modified by '{word}' (post-modifier check)")
-                        return False
-                        
-        return True
     
     def _safe_lower(self, value) -> str:
         """
@@ -204,6 +106,46 @@ class HybridSearchService:
             return str(value).lower() if value else ''
         return value.lower()
     
+    def _identify_intent_keywords(self, keywords: List[str]) -> Tuple[List[str], List[str]]:
+        """
+        Split keywords into 'core intent' and 'descriptive modifiers'.
+        
+        Core intent keywords are the ones most likely to identify the product type
+        (nouns). Descriptive modifiers are adjectives/attributes (e.g. 'waterproof',
+        'lightweight', 'men', 'kids').
+        
+        This is a lightweight heuristic — not a full NLP parser. It identifies
+        common descriptive words and treats the rest as core intent.
+        
+        Returns:
+            (core_keywords, descriptive_keywords)
+        """
+        DESCRIPTIVE_WORDS = {
+            'waterproof', 'water', 'repellent', 'resistant', 'lightweight', 'heavy',
+            'men', 'mens', 'women', 'womens', 'kids', 'junior', 'senior',
+            'large', 'small', 'medium', 'xl', 'xxl',
+            'red', 'blue', 'green', 'black', 'white', 'yellow', 'pink', 'grey', 'gray',
+            'cheap', 'premium', 'pro', 'professional', 'beginner',
+            'outdoor', 'indoor', 'foldable', 'portable', 'compact',
+            'under', 'above', 'below',
+        }
+        
+        core = []
+        descriptive = []
+        for kw in keywords:
+            if kw.lower() in DESCRIPTIVE_WORDS:
+                descriptive.append(kw)
+            else:
+                core.append(kw)
+        
+        # If ALL keywords were classified as descriptive (unlikely but possible),
+        # treat them all as core to avoid an empty core set
+        if not core:
+            core = keywords[:]
+            descriptive = []
+        
+        return core, descriptive
+    
     def calculate_keyword_score(
         self,
         product: Dict,
@@ -218,8 +160,7 @@ class HybridSearchService:
         - Description contains keyword: 0.3 (Lowest priority)
         
         For multi-keyword search, computes the maximum score among keywords,
-        plus a small bonus for matching multiple keywords. This prevents 
-        diluting scores of perfect matches for alternative keywords (e.g. Golf clubs).
+        plus a small bonus for matching multiple keywords.
         
         NULL-SAFE: Handles None values in all product fields.
         
@@ -233,24 +174,11 @@ class HybridSearchService:
         description = self._safe_lower(product.get('description'))
         cat1_lower = self._safe_lower(product.get('category_level_1'))
         
-        # Stemming variations (singular/plural)
-        def get_variations(word: str) -> List[str]:
-            w = word.lower()
-            vars = [w]
-            if w.endswith('s') and len(w) > 3:
-                vars.append(w[:-1])
-                if w.endswith('es') and len(w) > 4:
-                    vars.append(w[:-2])
-            else:
-                vars.append(w + 's')
-                vars.append(w + 'es')
-            return list(set(vars))
-        
         individual_scores = []
         unique_matches = 0
         
         for keyword in keywords:
-            vars = get_variations(keyword)
+            vars = self._get_variations(keyword)
             keyword_score = 0.0
             matched = False
             
@@ -281,11 +209,6 @@ class HybridSearchService:
             
             if matched:
                 unique_matches += 1
-                
-            # Apply product type name boost: +0.3 if the product type keyword matches in the name
-            if matched and keyword.lower() in self.KNOWN_PRODUCT_TYPES:
-                if any(var in product_name for var in vars):
-                    keyword_score += 0.3
                     
             individual_scores.append(keyword_score)
         
@@ -317,14 +240,18 @@ class HybridSearchService:
         keywords: Optional[List[str]] = None,
         price_limit: Optional[float] = None,
         limit: int = 100,
-        keyword_mode: str = 'AND'
+        keyword_mode: str = 'AND',
+        stage_name: str = "SQL"
     ) -> List[Dict]:
         """
-        Keyword-based product filtering using SQL.
+        Broad SQL candidate generation.
         
-        Strategy:
-            sport + category_level_1 + category_level_2 + price_limit (AND)
-            keywords match name OR description (AND or OR based on keyword_mode)
+        Purpose: Generate a large candidate pool with HIGH RECALL.
+        SQL applies only inexpensive structured filters (sport, price, gender, category)
+        and keyword matching across name + description.
+        
+        SQL does NOT perform precision filtering — that is the job of semantic
+        ranking and the LLM validator.
         """
         conn = connect_db()
         cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -371,23 +298,16 @@ class HybridSearchService:
                 query += " AND price <= %s"
                 params.append(price_limit)
             
-            # Full-text search: precise word matching with stemming (name OR description)
+            # Full-text search: precise word matching with stemming (name, description OR category)
             # plainto_tsquery safely handles any user input
             # Stemming: "clubs" matches "club", "running" matches "run"
             if keywords and len(keywords) > 0:
                 keyword_conditions = []
                 for keyword in keywords:
-                    kw_lower = keyword.lower()
-                    if kw_lower in self.KNOWN_PRODUCT_TYPES:
-                        # Product type keyword: must match in name OR category (not solely description)
-                        keyword_conditions.append(
-                            "to_tsvector('english', COALESCE(name, '') || ' ' || COALESCE(category_level_1, '') || ' ' || COALESCE(category_level_2, '')) @@ plainto_tsquery('english', %s)"
-                        )
-                    else:
-                        # Non-product type keyword: can match in name OR description
-                        keyword_conditions.append(
-                            "to_tsvector('english', COALESCE(name, '') || ' ' || COALESCE(description, '')) @@ plainto_tsquery('english', %s)"
-                        )
+                    # Search name, description, and categories to maximize recall
+                    keyword_conditions.append(
+                        "to_tsvector('english', COALESCE(name, '') || ' ' || COALESCE(description, '') || ' ' || COALESCE(category_level_1, '') || ' ' || COALESCE(category_level_2, '')) @@ plainto_tsquery('english', %s)"
+                    )
                     params.append(keyword)
                 
                 # AND mode: product must contain ALL keywords; OR mode: any keyword
@@ -398,12 +318,32 @@ class HybridSearchService:
             query += " ORDER BY rating DESC NULLS LAST, review_count DESC NULLS LAST"
             query += f" LIMIT {limit}"
             
-            logger.info(f"Keyword filter: sport={sport}, cat1={category_level_1}, cat2={category_level_2}, keywords={keywords}, price<={price_limit}, mode={keyword_mode}")
+            logger.info("🔍" + "=" * 79)
+            logger.info(f"📊 SQL STAGE: {stage_name}")
+            logger.info(f"   Sport: {sport}")
+            logger.info(f"   Category L1: {category_level_1}")
+            logger.info(f"   Category L2: {category_level_2}")
+            logger.info(f"   Keywords: {keywords}")
+            logger.info(f"   Price limit: {price_limit}")
+            logger.info(f"   Keyword mode: {keyword_mode}")
+            logger.info(f"   SQL Query: {query}")
+            logger.info(f"   SQL Params: {params}")
             
             cur.execute(query, params)
             results = cur.fetchall()
             
-            logger.info(f"✓ Keyword filter returned {len(results)} candidates")
+            logger.info(f"✅ SQL RETURNED: {len(results)} candidates")
+            
+            if results:
+                logger.info("📦 CANDIDATE DETAILS:")
+                for idx, r in enumerate(results[:20], 1):  # Log first 20
+                    logger.info(f"   {idx}. ID={r['product_id']} | {r['name']} | Price=₹{r['price']}")
+                if len(results) > 20:
+                    logger.info(f"   ... and {len(results) - 20} more")
+            else:
+                logger.warning("⚠️  NO SQL CANDIDATES RETURNED")
+            
+            logger.info("=" * 80)
             
             return [convert_decimals(dict(row)) for row in results]
             
@@ -426,14 +366,19 @@ class HybridSearchService:
             Dict mapping product_id to semantic similarity score [0.0, 1.0]
         """
         if not candidate_products:
+            logger.warning("⚠️  SEMANTIC SEARCH: No candidates to score")
             return {}
         
         conn = connect_db()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
         try:
+            logger.info("🧠" + "=" * 79)
+            logger.info(f"🧠 SEMANTIC SEARCH STAGE")
+            logger.info(f"   Query text: {query_text}")
+            logger.info(f"   Input candidates: {len(candidate_products)}")
+            
             # Generate query embedding
-            logger.info(f"Generating embedding for: {query_text}")
             query_embedding = self.embedding_service.embed_text(query_text)
             
             # Extract product IDs
@@ -455,7 +400,17 @@ class HybridSearchService:
             # Build product_id → similarity map
             similarity_map = {row['product_id']: float(row['similarity']) for row in results}
             
-            logger.info(f"✓ Semantic search scored {len(similarity_map)} products")
+            logger.info(f"✅ SEMANTIC SCORES COMPUTED: {len(similarity_map)} products scored")
+            
+            if similarity_map:
+                # Show top 10 scores
+                sorted_scores = sorted(similarity_map.items(), key=lambda x: x[1], reverse=True)[:10]
+                logger.info("🎯 TOP 10 SEMANTIC SCORES:")
+                for pid, score in sorted_scores:
+                    prod_name = next((p['name'] for p in candidate_products if p['product_id'] == pid), 'Unknown')
+                    logger.info(f"   {score:.4f} | ID={pid} | {prod_name}")
+            
+            logger.info("=" * 80)
             
             return similarity_map
             
@@ -471,53 +426,39 @@ class HybridSearchService:
         query_text: str,
         keywords: List[str],
         candidate_products: List[Dict],
-        top_k: int = 10,
-        fallback_step: int = 0
+        top_k: int = 10
     ) -> List[Dict]:
         """
-        TRUE HYBRID RANKING: Combine keyword and semantic scores with precision validations.
+        TRUE HYBRID RANKING: Combine keyword and semantic scores.
+        
+        This method scores and ranks candidates. It does NOT perform precision
+        filtering — that is handled downstream by the LLM validator.
         
         Formula:
             final_score = (semantic_score * 0.6) + (keyword_score * 0.4)
         """
         if not candidate_products:
+            logger.warning("⚠️  HYBRID RANKING: No candidates to rank")
             return []
         
-        logger.info("=" * 80)
-        logger.info("HYBRID RANKING")
-        logger.info(f"Query: {query_text}")
-        logger.info(f"Keywords: {keywords}")
-        logger.info(f"Candidates: {len(candidate_products)}")
+        logger.info("⚡" + "=" * 79)
+        logger.info("⚡ HYBRID RANKING STAGE")
+        logger.info(f"   Query: {query_text}")
+        logger.info(f"   Keywords: {keywords}")
+        logger.info(f"   Input candidates: {len(candidate_products)}")
         logger.info("=" * 80)
         
-        # Determine requested product types from keywords
-        requested_product_types = []
-        if keywords:
-            for kw in keywords:
-                kw_lower = kw.lower()
-                if kw_lower in self.KNOWN_PRODUCT_TYPES:
-                    requested_product_types.append(kw_lower)
-        has_product_type = len(requested_product_types) > 0
-        
-        # Calculate keyword scores first to allow early exit
+        # Calculate keyword scores
         candidate_keyword_scores = {}
-        has_any_keyword_match = False
-        
         for product in candidate_products:
             pid = product['product_id']
             kw_score = self.calculate_keyword_score(product, keywords)
             candidate_keyword_scores[pid] = kw_score
-            if kw_score > 0.0:
-                has_any_keyword_match = True
                 
-        if keywords and not has_any_keyword_match:
-            logger.info("Zero keyword match among all candidates. Returning empty results immediately.")
-            return []
-            
         # Get semantic scores
         semantic_scores = self.semantic_search(query_text, candidate_products)
         
-        # Combine scores and apply validations
+        # Combine scores
         ranked_products = []
         
         for product in candidate_products:
@@ -533,26 +474,9 @@ class HybridSearchService:
             # Calculate final hybrid score
             final_score = (semantic_score * self.SEMANTIC_WEIGHT) + (keyword_score * self.KEYWORD_WEIGHT)
             
-            # Threshold checks:
-            # 1. final_score < 0.15 -> Reject
+            # Minimum threshold: reject products with extremely low combined relevance
             if final_score < 0.15:
-                logger.info(f"Rejecting '{product_name}' [id={product_id}] due to final_score {final_score:.4f} < 0.15")
-                continue
-                
-            # 2. keyword_score == 0.0 when keywords were provided -> Reject
-            if keywords and keyword_score == 0.0:
-                logger.info(f"Rejecting '{product_name}' [id={product_id}] due to keyword_score == 0.0 when keywords were provided")
-                continue
-                
-            # 3. Product type validation
-            if has_product_type and not self._matches_product_type(
-                product_name, 
-                product.get('description'), 
-                requested_product_types,
-                product.get('category_level_1', ''),
-                product.get('category_level_2', '')
-            ):
-                logger.info(f"Rejecting '{product_name}' [id={product_id}] because it does not match requested product type(s): {requested_product_types}")
+                logger.debug(f"Rejecting '{product_name}' [id={product_id}] due to final_score {final_score:.4f} < 0.15")
                 continue
             
             # Add scores to product
@@ -566,40 +490,17 @@ class HybridSearchService:
         # Sort by final score (descending)
         ranked_products.sort(key=lambda x: x['final_score'], reverse=True)
         
-        # Log top results with detailed diagnostics (Change 6)
-        logger.info("TOP RANKED PRODUCTS:")
+        logger.info(f"✅ HYBRID RANKING COMPLETE: {len(ranked_products)} products ranked")
+        logger.info(f"   Products passing threshold (score >= 0.15): {len(ranked_products)}")
+        
+        # Log top results
+        logger.info(f"🏆 TOP {min(top_k, len(ranked_products))} RANKED PRODUCTS:")
         for i, p in enumerate(ranked_products[:top_k], 1):
             pname = p['name']
             pid = p['product_id']
-            pdesc = self._safe_lower(p.get('description'))
-            
-            # Reconstruct diagnostic info
-            matched_keywords = []
-            for kw in (keywords or []):
-                kw_lower = kw.lower()
-                vars = self._get_product_type_variations(kw_lower)
-                if any(var in pname.lower() for var in vars):
-                    matched_keywords.append(f"{kw}(name)")
-                elif any(var in pdesc for var in vars):
-                    matched_keywords.append(f"{kw}(desc)")
-                    
-            product_type_match = "NO"
-            if has_product_type:
-                matched_types = []
-                for p_type in requested_product_types:
-                    vars = self._get_product_type_variations(p_type)
-                    if any(var in pname.lower() for var in vars):
-                        matched_types.append(f"{p_type} in name")
-                    elif any(var in pdesc for var in vars):
-                        matched_types.append(f"{p_type} in desc")
-                if matched_types:
-                    product_type_match = f"YES ({', '.join(matched_types)})"
-                    
-            logger.info(f"RESULT {i}: \"{pname}\" [product_id={pid}]")
-            logger.info(f"  semantic={p['semantic_score']:.2f}  keyword={p['keyword_score']:.2f}  final={p['final_score']:.2f}")
-            logger.info(f"  matched_keywords: {', '.join(matched_keywords)}")
-            logger.info(f"  product_type_match: {product_type_match}")
-            logger.info(f"  fallback_step: {fallback_step}")
+            logger.info(f"   {i}. ID={pid} | {pname}")
+            logger.info(f"      semantic={p['semantic_score']:.4f} | keyword={p['keyword_score']:.4f} | final={p['final_score']:.4f}")
+        
         logger.info("=" * 80)
         
         return ranked_products[:top_k]
@@ -611,10 +512,24 @@ class HybridSearchService:
         category_level_2: Optional[str] = None,
         keywords: Optional[List[str]] = None,
         price_limit: Optional[float] = None,
-        top_k: int = 10
-    ) -> List[Dict]:
+        top_k: int = 10,
+        return_format: str = 'dict'
+    ) -> Union[Dict[str, List[Dict]], List[Dict]]:
         """
-        TRUE HYBRID SEARCH: keyword scoring + semantic scoring + SLM validation.
+        Main search entry point.
+        
+        Pipeline:
+            1. Broad SQL Candidate Generation (progressive relaxation)
+            2. Hybrid Ranking (keyword + semantic scoring)
+            3. LLM Validation (precision filtering for product-type queries)
+        
+        Args:
+            return_format: 'dict' returns {'relevant': [...], 'related': [...]} (for external API)
+                          'flat' returns flat list of RELEVANT products only (for backward compatibility)
+        
+        Returns:
+            Dict with 'relevant' and 'related' keys if return_format='dict'
+            List of RELEVANT products if return_format='flat'
         """
         logger.info("=" * 80)
         logger.info("HYBRID SEARCH REQUEST")
@@ -625,106 +540,366 @@ class HybridSearchService:
         logger.info(f"Price Limit: {price_limit}")
         logger.info("=" * 80)
         
-        # Determine requested product types from keywords
-        product_type = None
-        is_broad_query = False
-        if keywords:
-            for kw in keywords:
-                if kw.lower() in self.BROAD_QUERY_MODIFIERS:
-                    is_broad_query = True
-                    break
-            
-            if not is_broad_query:
-                for kw in keywords:
-                    kw_lower = kw.lower()
-                    if kw_lower in self.KNOWN_PRODUCT_TYPES:
-                        product_type = kw_lower
-                        break
+        # =====================================================================
+        # STAGE 1: Broad SQL Candidate Generation with Progressive Relaxation
+        # =====================================================================
+        # SQL is ONLY responsible for generating a broad candidate pool.
+        # It maximizes recall, not precision.
         
-        has_product_type = product_type is not None
-        
-        # Graduated fallback cascade for candidate retrieval
         candidates = []
-        fallback_step = 0
+        seen_ids = set()
+        retrieval_stages = []
+        TARGET_POOL_SIZE = 40
         
-        # Step 1: Strictest — sport + category + keywords (AND) + price
-        if keywords and len(keywords) > 1:
-            candidates = self.keyword_filter(
-                sport=sport,
-                category_level_1=category_level_1,
-                category_level_2=category_level_2,
-                keywords=keywords,
-                price_limit=price_limit,
-                limit=100,
-                keyword_mode='AND'
-            )
-            fallback_step = 1
-            if candidates:
-                logger.info(f"✓ Step 1 (AND keywords + category): {len(candidates)} candidates")
+        logger.info("🚀" + "=" * 79)
+        logger.info("🚀 RETRIEVAL PIPELINE START")
+        logger.info("=" * 80)
         
-        # Step 2: Relax keyword mode — sport + category + keywords (OR) + price
-        if not candidates:
-            candidates = self.keyword_filter(
-                sport=sport,
-                category_level_1=category_level_1,
-                category_level_2=category_level_2,
-                keywords=keywords,
-                price_limit=price_limit,
-                limit=100,
-                keyword_mode='OR'
-            )
-            fallback_step = 2
-            if candidates:
-                logger.info(f"✓ Step 2 (OR keywords + category): {len(candidates)} candidates")
+        def add_candidates(new_list: List[Dict], stage_name: str) -> bool:
+            added_count = 0
+            for item in new_list:
+                pid = item['product_id']
+                if pid not in seen_ids:
+                    seen_ids.add(pid)
+                    candidates.append(item)
+                    added_count += 1
+            if added_count > 0:
+                retrieval_stages.append(f"{stage_name}(+{added_count})")
+                logger.info(f"✅ Stage '{stage_name}' added {added_count} new candidates (Total pool: {len(candidates)})")
+                return True
+            else:
+                logger.info(f"⏭️  Stage '{stage_name}' SKIPPED (no new candidates)")
+                return False
         
-        # Step 3: Drop category — sport + keywords (OR) + price
-        if not candidates and category_level_1:
-            logger.warning("No category candidates, trying sport + keywords only")
-            candidates = self.keyword_filter(
-                sport=sport,
-                keywords=keywords,
-                price_limit=price_limit,
-                limit=100,
-                keyword_mode='OR'
-            )
-            fallback_step = 3
-            if candidates:
-                logger.info(f"✓ Step 3 (OR keywords, no category): {len(candidates)} candidates")
-        
-        # Step 4 & 5: Sport-only fallback OR Relaxed sport keyword fallback
-        if not candidates:
-            if has_product_type:
-                logger.warning(f"No candidates found in sport {sport} with keywords. Relaxing sport filter to search for product type across all sports.")
-                candidates = self.keyword_filter(
-                    sport=None,
-                    category_level_1=None,
-                    category_level_2=None,
+        if keywords:
+            # Separate core intent keywords from descriptive modifiers
+            core_keywords, descriptive_keywords = self._identify_intent_keywords(keywords)
+            
+            logger.info("🔍 KEYWORD ANALYSIS:")
+            logger.info(f"   All keywords: {keywords}")
+            logger.info(f"   Core keywords: {core_keywords}")
+            logger.info(f"   Descriptive keywords: {descriptive_keywords}")
+            logger.info(f"   Target pool size: {TARGET_POOL_SIZE}")
+            logger.info("=" * 80)
+            
+            # --- Stage 1: All keywords (AND) + structured filters ---
+            logger.info(">>> ENTERING Stage 1")
+            if len(candidates) < TARGET_POOL_SIZE:
+                logger.info("🔹 Attempting Stage 1: All keywords (AND) + structured filters")
+                logger.info(f"   Condition check: len(candidates)={len(candidates)} < TARGET={TARGET_POOL_SIZE} ✓")
+                stage_candidates = self.keyword_filter(
+                    sport=sport,
+                    category_level_1=category_level_1,
+                    category_level_2=category_level_2,
                     keywords=keywords,
                     price_limit=price_limit,
                     limit=100,
-                    keyword_mode='OR'
+                    keyword_mode='AND',
+                    stage_name="Stage_1_all_keywords_AND"
                 )
-                fallback_step = 5
-                if candidates:
-                    logger.info(f"✓ Step 5 (OR keywords, relaxed sport filter): {len(candidates)} candidates")
+                add_candidates(stage_candidates, '1_all_keywords_AND')
             else:
-                logger.warning("No keyword candidates and no product type detected, falling back to sport-only")
-                candidates = self.keyword_filter(
+                logger.info("⏭️  Stage 1 SKIPPED (target pool size reached)")
+            logger.info(f"<<< EXITING Stage 1: candidates={len(candidates)}")
+            
+            logger.info(f"📊 After Stage 1: candidates={len(candidates)}")
+            
+            # --- Stage 1b: All keywords (AND) + drop category filters ---
+            logger.info(">>> ENTERING Stage 1b")
+            if len(candidates) < TARGET_POOL_SIZE and (category_level_1 or category_level_2):
+                logger.info("🔹 Attempting Stage 1b: All keywords (AND) + drop category")
+                logger.info(f"   Condition: len(candidates)={len(candidates)} < TARGET={TARGET_POOL_SIZE} ✓")
+                logger.info(f"   Condition: has categories to drop ✓")
+                stage_candidates = self.keyword_filter(
                     sport=sport,
+                    keywords=keywords,
                     price_limit=price_limit,
-                    limit=100
+                    limit=100,
+                    keyword_mode='AND',
+                    stage_name="Stage_1b_all_keywords_AND_no_category"
                 )
-                fallback_step = 4
-                if candidates:
-                    logger.info(f"✓ Step 4 (sport-only fallback): {len(candidates)} candidates")
+                add_candidates(stage_candidates, '1b_all_keywords_AND_no_category')
+            else:
+                if len(candidates) >= TARGET_POOL_SIZE:
+                    logger.info("⏭️  Stage 1b SKIPPED (target pool size reached)")
+                else:
+                    logger.info("⏭️  Stage 1b SKIPPED (no categories to drop)")
+            logger.info(f"<<< EXITING Stage 1b: candidates={len(candidates)}")
+            
+            logger.info(f"📊 After Stage 1b: candidates={len(candidates)}")
+            
+            # --- Stage 2: Relax descriptive keywords, keep core intent ---
+            logger.info(">>> ENTERING Stage 2")
+            logger.info("=" * 80)
+            logger.info("🔍 STAGE 2 CONDITION CHECK - RUNTIME VALUES:")
+            logger.info(f"   len(candidates) = {len(candidates)}")
+            logger.info(f"   TARGET_POOL_SIZE = {TARGET_POOL_SIZE}")
+            logger.info(f"   core_keywords = {core_keywords}")
+            logger.info(f"   descriptive_keywords = {descriptive_keywords}")
+            logger.info(f"   keywords = {keywords}")
+            logger.info(f"   len(core_keywords) = {len(core_keywords)}")
+            logger.info(f"   len(keywords) = {len(keywords)}")
+            logger.info("")
+            
+            stage2_cond1_pool_size = len(candidates) < TARGET_POOL_SIZE
+            stage2_cond2_has_descriptive = bool(descriptive_keywords)
+            stage2_cond3_core_less_than_all = len(core_keywords) < len(keywords)
+            stage2_cond2_full = descriptive_keywords and len(core_keywords) < len(keywords)
+            stage2_execute = stage2_cond1_pool_size and stage2_cond2_full
+            
+            logger.info(f"   Condition 1 (pool size check): len(candidates) < TARGET_POOL_SIZE = {stage2_cond1_pool_size}")
+            logger.info(f"   Condition 2a (has descriptive): bool(descriptive_keywords) = {stage2_cond2_has_descriptive}")
+            logger.info(f"   Condition 2b (core < all): len(core_keywords) < len(keywords) = {stage2_cond3_core_less_than_all}")
+            logger.info(f"   Condition 2 (combined): descriptive_keywords AND core<all = {stage2_cond2_full}")
+            logger.info("")
+            logger.info(f"   FINAL Stage 2 decision: {'EXECUTE' if stage2_execute else 'SKIP'}")
+            logger.info("=" * 80)
+            
+            if stage2_execute:
+                candidates_before_stage2 = len(candidates)
+                logger.info("🔹 Attempting Stage 2a: Core keywords (AND) + structured filters")
+                logger.info(f"   Core keywords: {core_keywords}")
+                logger.info(f"   Descriptive keywords (dropped): {descriptive_keywords}")
+                # Stage 2a: Core keywords (AND) + structured filters
+                stage_candidates = self.keyword_filter(
+                    sport=sport,
+                    category_level_1=category_level_1,
+                    category_level_2=category_level_2,
+                    keywords=core_keywords,
+                    price_limit=price_limit,
+                    limit=100,
+                    keyword_mode='AND',
+                    stage_name="Stage_2a_core_keywords_AND"
+                )
+                stage2a_added = add_candidates(stage_candidates, '2a_core_keywords_AND')
+                
+                logger.info(f"   Stage 2a results:")
+                logger.info(f"      Candidates before: {candidates_before_stage2}")
+                logger.info(f"      Candidates after: {len(candidates)}")
+                logger.info(f"      New products added: {len(candidates) - candidates_before_stage2}")
+                if stage2a_added:
+                    logger.info(f"      IDs of new products:")
+                    new_products = candidates[candidates_before_stage2:]
+                    for idx, p in enumerate(new_products[:20], 1):
+                        logger.info(f"         {idx}. ID={p['product_id']} | {p['name']}")
+                
+                # Stage 2b: Core keywords (AND) + drop category
+                logger.info(">>> ENTERING Stage 2b")
+                candidates_before_stage2b = len(candidates)
+                if len(candidates) < TARGET_POOL_SIZE and (category_level_1 or category_level_2):
+                    logger.info("🔹 Attempting Stage 2b: Core keywords (AND) + drop category")
+                    stage_candidates = self.keyword_filter(
+                        sport=sport,
+                        keywords=core_keywords,
+                        price_limit=price_limit,
+                        limit=100,
+                        keyword_mode='AND',
+                        stage_name="Stage_2b_core_keywords_AND_no_category"
+                    )
+                    stage2b_added = add_candidates(stage_candidates, '2b_core_keywords_AND_no_category')
+                    
+                    logger.info(f"   Stage 2b results:")
+                    logger.info(f"      Candidates before: {candidates_before_stage2b}")
+                    logger.info(f"      Candidates after: {len(candidates)}")
+                    logger.info(f"      New products added: {len(candidates) - candidates_before_stage2b}")
+                    if stage2b_added:
+                        logger.info(f"      IDs of new products:")
+                        new_products = candidates[candidates_before_stage2b:]
+                        for idx, p in enumerate(new_products[:20], 1):
+                            logger.info(f"         {idx}. ID={p['product_id']} | {p['name']}")
+                else:
+                    if len(candidates) >= TARGET_POOL_SIZE:
+                        logger.info("⏭️  Stage 2b SKIPPED (target pool size reached)")
+                    else:
+                        logger.info("⏭️  Stage 2b SKIPPED (no categories to drop)")
+                logger.info(f"<<< EXITING Stage 2b: candidates={len(candidates)}")
+            else:
+                if len(candidates) >= TARGET_POOL_SIZE:
+                    logger.info("⏭️  Stage 2 SKIPPED (target pool size reached)")
+                elif not descriptive_keywords:
+                    logger.info("⏭️  Stage 2 SKIPPED (no descriptive keywords to relax)")
+                elif not (len(core_keywords) < len(keywords)):
+                    logger.info("⏭️  Stage 2 SKIPPED (all keywords are core, none are descriptive)")
+                else:
+                    logger.info("⏭️  Stage 2 SKIPPED (unknown reason)")
+            
+            logger.info(f"<<< EXITING Stage 2: candidates={len(candidates)}")
+            logger.info(f"📊 After Stage 2: candidates={len(candidates)}")
+            
+            # --- Stage 2c: All keywords in OR mode ---
+            logger.info(">>> ENTERING Stage 2c")
+            logger.info("=" * 80)
+            logger.info("🔍 STAGE 2c CONDITION CHECK - RUNTIME VALUES:")
+            logger.info(f"   len(candidates) = {len(candidates)}")
+            logger.info(f"   TARGET_POOL_SIZE = {TARGET_POOL_SIZE}")
+            logger.info(f"   keywords = {keywords}")
+            logger.info("")
+            
+            stage2c_cond1_pool_size = len(candidates) < TARGET_POOL_SIZE
+            stage2c_execute = stage2c_cond1_pool_size
+            
+            logger.info(f"   Condition 1 (pool size check): len(candidates) < TARGET_POOL_SIZE = {stage2c_cond1_pool_size}")
+            logger.info("")
+            logger.info(f"   FINAL Stage 2c decision: {'EXECUTE' if stage2c_execute else 'SKIP'}")
+            logger.info("=" * 80)
+            
+            if stage2c_execute:
+                candidates_before_stage2c = len(candidates)
+                logger.info("🔹 Attempting Stage 2c: All keywords (OR mode)")
+                stage_candidates = self.keyword_filter(
+                    sport=sport,
+                    category_level_1=category_level_1,
+                    category_level_2=category_level_2,
+                    keywords=keywords,
+                    price_limit=price_limit,
+                    limit=100,
+                    keyword_mode='OR',
+                    stage_name="Stage_2c_all_keywords_OR"
+                )
+                stage2c_added = add_candidates(stage_candidates, '2c_all_keywords_OR')
+                
+                logger.info(f"   Stage 2c results:")
+                logger.info(f"      Candidates before: {candidates_before_stage2c}")
+                logger.info(f"      Candidates after: {len(candidates)}")
+                logger.info(f"      New products added: {len(candidates) - candidates_before_stage2c}")
+                if stage2c_added:
+                    logger.info(f"      IDs of new products:")
+                    new_products = candidates[candidates_before_stage2c:]
+                    for idx, p in enumerate(new_products[:20], 1):
+                        logger.info(f"         {idx}. ID={p['product_id']} | {p['name']}")
+                
+                # Stage 2d: OR mode + drop category
+                logger.info(">>> ENTERING Stage 2d")
+                candidates_before_stage2d = len(candidates)
+                if len(candidates) < TARGET_POOL_SIZE and (category_level_1 or category_level_2):
+                    logger.info("🔹 Attempting Stage 2d: All keywords (OR) + drop category")
+                    stage_candidates = self.keyword_filter(
+                        sport=sport,
+                        keywords=keywords,
+                        price_limit=price_limit,
+                        limit=100,
+                        keyword_mode='OR',
+                        stage_name="Stage_2d_all_keywords_OR_no_category"
+                    )
+                    stage2d_added = add_candidates(stage_candidates, '2d_all_keywords_OR_no_category')
+                    
+                    logger.info(f"   Stage 2d results:")
+                    logger.info(f"      Candidates before: {candidates_before_stage2d}")
+                    logger.info(f"      Candidates after: {len(candidates)}")
+                    logger.info(f"      New products added: {len(candidates) - candidates_before_stage2d}")
+                    if stage2d_added:
+                        logger.info(f"      IDs of new products:")
+                        new_products = candidates[candidates_before_stage2d:]
+                        for idx, p in enumerate(new_products[:20], 1):
+                            logger.info(f"         {idx}. ID={p['product_id']} | {p['name']}")
+                else:
+                    if len(candidates) >= TARGET_POOL_SIZE:
+                        logger.info("⏭️  Stage 2d SKIPPED (target pool size reached)")
+                    else:
+                        logger.info("⏭️  Stage 2d SKIPPED (no categories to drop)")
+                logger.info(f"<<< EXITING Stage 2d: candidates={len(candidates)}")
+            else:
+                logger.info("⏭️  Stage 2c/2d SKIPPED (target pool size reached)")
+            
+            logger.info(f"<<< EXITING Stage 2c: candidates={len(candidates)}")
+            logger.info(f"📊 After Stage 2c/2d: candidates={len(candidates)}")
+        
+        # --- Stage 3: Structured filters only (no keywords) ---
+        # Let semantic search rank the entire sport's catalog
+        logger.info(">>> ENTERING Stage 3")
+        logger.info("=" * 80)
+        logger.info("🔍 STAGE 3 CONDITION CHECK - RUNTIME VALUES:")
+        logger.info(f"   len(candidates) = {len(candidates)}")
+        logger.info(f"   TARGET_POOL_SIZE = {TARGET_POOL_SIZE}")
+        logger.info(f"   sport = {sport}")
+        logger.info(f"   category_level_1 = {category_level_1}")
+        logger.info(f"   category_level_2 = {category_level_2}")
+        logger.info("")
+        
+        stage3_cond1_pool_size = len(candidates) < TARGET_POOL_SIZE
+        stage3_execute = stage3_cond1_pool_size
+        
+        logger.info(f"   Condition 1 (pool size check): len(candidates) < TARGET_POOL_SIZE = {stage3_cond1_pool_size}")
+        logger.info("")
+        logger.info(f"   FINAL Stage 3 decision: {'EXECUTE' if stage3_execute else 'SKIP'}")
+        logger.info("=" * 80)
+        
+        if stage3_execute:
+            candidates_before_stage3 = len(candidates)
+            logger.info("🔹 Attempting Stage 3: Structured filters only (no keywords)")
+            stage_candidates = self.keyword_filter(
+                sport=sport,
+                category_level_1=category_level_1,
+                category_level_2=category_level_2,
+                keywords=None,
+                price_limit=price_limit,
+                limit=100,
+                stage_name="Stage_3_structured_only"
+            )
+            stage3_added = add_candidates(stage_candidates, '3_structured_only')
+            
+            logger.info(f"   Stage 3 results:")
+            logger.info(f"      Candidates before: {candidates_before_stage3}")
+            logger.info(f"      Candidates after: {len(candidates)}")
+            logger.info(f"      New products added: {len(candidates) - candidates_before_stage3}")
+            if stage3_added:
+                logger.info(f"      IDs of new products:")
+                new_products = candidates[candidates_before_stage3:]
+                for idx, p in enumerate(new_products[:20], 1):
+                    logger.info(f"         {idx}. ID={p['product_id']} | {p['name']}")
+            
+            # Stage 3b: Sport + price only
+            logger.info(">>> ENTERING Stage 3b")
+            candidates_before_stage3b = len(candidates)
+            if len(candidates) < TARGET_POOL_SIZE and (category_level_1 or category_level_2):
+                logger.info("🔹 Attempting Stage 3b: Sport + price only (drop categories)")
+                stage_candidates = self.keyword_filter(
+                    sport=sport,
+                    keywords=None,
+                    price_limit=price_limit,
+                    limit=100,
+                    stage_name="Stage_3b_sport_price_only"
+                )
+                stage3b_added = add_candidates(stage_candidates, '3b_sport_price_only')
+                
+                logger.info(f"   Stage 3b results:")
+                logger.info(f"      Candidates before: {candidates_before_stage3b}")
+                logger.info(f"      Candidates after: {len(candidates)}")
+                logger.info(f"      New products added: {len(candidates) - candidates_before_stage3b}")
+                if stage3b_added:
+                    logger.info(f"      IDs of new products:")
+                    new_products = candidates[candidates_before_stage3b:]
+                    for idx, p in enumerate(new_products[:20], 1):
+                        logger.info(f"         {idx}. ID={p['product_id']} | {p['name']}")
+            else:
+                if len(candidates) >= TARGET_POOL_SIZE:
+                    logger.info("⏭️  Stage 3b SKIPPED (target pool size reached)")
+                else:
+                    logger.info("⏭️  Stage 3b SKIPPED (no categories to drop)")
+            logger.info(f"<<< EXITING Stage 3b: candidates={len(candidates)}")
+        else:
+            logger.info("⏭️  Stage 3 SKIPPED (target pool size reached)")
+        
+        logger.info(f"<<< EXITING Stage 3: candidates={len(candidates)}")
+        logger.info(f"📊 After Stage 3: candidates={len(candidates)}")
         
         if not candidates:
-            logger.warning(f"No products found for sport={sport}")
+            logger.error(f"❌ NO CANDIDATES FOUND after all retrieval stages for sport={sport}")
             return []
         
-        logger.info(f"✓ Found {len(candidates)} candidates (fallback step {fallback_step})")
+        retrieval_stage_str = ", ".join(retrieval_stages) if retrieval_stages else "none"
+        logger.info("=" * 80)
+        logger.info(f"✅ RETRIEVAL COMPLETE: {len(candidates)} total candidates")
+        logger.info(f"   Retrieval stages used: {retrieval_stage_str}")
+        logger.info("=" * 80)
         
-        # Build semantic query text — always include sport for full context
+        # =====================================================================
+        # STAGE 2: Hybrid Ranking (Keyword + Semantic Scoring)
+        # =====================================================================
+        
+        logger.info(">>> ENTERING HYBRID RANKING")
+        
+        # Build semantic query text — include sport for context
         query_parts = []
         if sport:
             query_parts.append(sport)
@@ -737,52 +912,86 @@ class HybridSearchService:
             
         query_text = " ".join(query_parts)
         
-        # Set candidate limit: 15 for SLM validation to prevent latency bottleneck
-        top_k_candidates = 15 if has_product_type else top_k
+        # Send a broader set to hybrid ranking so we have enough for the validator
+        # Keep this small enough to avoid validator timeouts (~5s per candidate on local model)
+        ranking_limit = max(top_k + 5, 15)
         
-        # Hybrid ranking (keyword + semantic)
         ranked_products = self.hybrid_rank(
             query_text=query_text,
             keywords=keywords or [],
             candidate_products=candidates,
-            top_k=top_k_candidates,
-            fallback_step=fallback_step
+            top_k=ranking_limit
         )
         
+        logger.info(f"<<< EXITING HYBRID RANKING: {len(ranked_products)} products ranked")
+        
         if not ranked_products:
-            if has_product_type:
-                logger.info(f"No products matching product type '{product_type}' found. Returning empty results rather than unrelated products.")
-            else:
-                logger.info("No products found matching the query criteria.")
-            return []
+            logger.info("No products survived hybrid ranking.")
+            return {'relevant': [], 'related': []}
+        
+        # =====================================================================
+        # STAGE 3: LLM Validation (High Precision)
+        # =====================================================================
+        # The validator decides RELEVANT / RELATED / NOT_RELEVANT.
+        # This is where precision filtering happens — NOT in SQL.
+        
+        logger.info(">>> ENTERING LLM VALIDATION")
+        
+        # Determine if we have a product-type query that needs validation
+        product_type = None
+        if keywords:
+            for kw in keywords:
+                kw_lower = kw.lower()
+                # Use a lightweight check: if the keyword appears to be a product noun
+                # (not a descriptive adjective), treat it as the product type for validation
+                if kw_lower not in {'waterproof', 'water', 'repellent', 'resistant',
+                                     'lightweight', 'heavy', 'men', 'mens', 'women', 'womens',
+                                     'kids', 'junior', 'senior', 'large', 'small', 'medium',
+                                     'red', 'blue', 'green', 'black', 'white', 'yellow',
+                                     'pink', 'grey', 'gray', 'cheap', 'premium', 'pro',
+                                     'professional', 'beginner', 'outdoor', 'indoor',
+                                     'foldable', 'portable', 'compact', 'under', 'above', 'below',
+                                     'show', 'me', 'find', 'get', 'best', 'top', 'good'}:
+                    product_type = kw_lower
+                    break
+        
+        if product_type:
+            logger.info("🤖" + "=" * 79)
+            logger.info(f"🤖 LLM VALIDATION STAGE")
+            logger.info(f"   Product type requested: '{product_type}'")
+            logger.info(f"   Candidates to validate: {len(ranked_products)}")
+            logger.info("=" * 80)
             
-        # SLM Validation and Re-Ranking Layer
-        if has_product_type:
-            logger.info(f"SLM product validation enabled for product type: '{product_type}'")
             validation_decisions = self.validation_service.validate_products(product_type, ranked_products)
             
-            # Safe Fallback (No fail-open): if offline, fall back directly to original hybrid ranking
+            # Safe Fallback: if validator is offline, only return products that
+            # have keyword_score > 0 (i.e. they actually contain the product type keyword).
+            # If NO candidates matched the keyword, return empty — the product type
+            # doesn't exist in this catalog segment, so returning random items is wrong.
             if validation_decisions is None:
-                logger.warning("SLM validation service failed or offline. Falling back to default hybrid ranking (no validation).")
-                return ranked_products[:top_k]
+                logger.warning("⚠️  LLM VALIDATOR OFFLINE - Applying keyword-based fallback")
+                keyword_matched = [p for p in ranked_products if p.get('keyword_score', 0) > 0]
+                if keyword_matched:
+                    logger.info(f"✅ Keyword fallback: {len(keyword_matched)} products matched keyword '{product_type}'")
+                    return keyword_matched[:top_k]
+                else:
+                    logger.error(f"❌ No products matched keyword '{product_type}'. Returning empty.")
+                    return []
                 
             # Create lookup map for decisions
             decisions_map = {str(d.get("id")): d for d in validation_decisions}
             
-            # Log detailed diagnostics for each candidate (Change 5 & 7)
-            logger.info("=" * 80)
-            logger.info("VALIDATION RESULT")
-            logger.info(f"Query: {' '.join(keywords) if keywords else ''}")
-            logger.info(f"Requested Product Type: {product_type}")
-            logger.info("=" * 80)
+            # Log detailed diagnostics
+            logger.info("📋 VALIDATION DECISIONS:")
             for p in ranked_products:
                 pid = str(p['product_id'])
-                d_info = decisions_map.get(pid, {"decision": "NOT_RELEVANT", "confidence": 0.0, "reason": "No decision returned from SLM"})
-                logger.info(f"Candidate: {p['name']}")
-                logger.info(f"Decision: {d_info.get('decision')}")
-                logger.info(f"Confidence: {d_info.get('confidence')}")
-                logger.info(f"Reason: {d_info.get('reason')}")
-                logger.info("-" * 40)
+                d_info = decisions_map.get(pid, {"decision": "NOT_RELEVANT", "confidence": 0.0, "reason": "No decision"})
+                decision = d_info.get('decision')
+                conf = d_info.get('confidence')
+                reason = d_info.get('reason')
+                logger.info(f"   ID={pid} | {p['name']}")
+                logger.info(f"      Decision: {decision} | Confidence: {conf:.2f} | Reason: {reason}")
+            
             logger.info("=" * 80)
             
             relevant_products = []
@@ -800,7 +1009,7 @@ class HybridSearchService:
                 if decision not in ("RELEVANT", "RELATED"):
                     continue
                     
-                # Update final score using formula: 0.7 * hybrid_score + 0.3 * validation_confidence
+                # Update final score: 0.7 * hybrid_score + 0.3 * validation_confidence
                 p_copy = p.copy()
                 hybrid_score = float(p.get("final_score", 0.0))
                 new_final_score = round((hybrid_score * 0.7) + (confidence * 0.3), 4)
@@ -818,12 +1027,73 @@ class HybridSearchService:
             relevant_products.sort(key=lambda x: x["final_score"], reverse=True)
             related_products.sort(key=lambda x: x["final_score"], reverse=True)
             
-            # Combine: RELEVANT first, then RELATED
-            final_ranked = relevant_products + related_products
+            logger.info("=" * 80)
+            logger.info(f"✅ VALIDATION SUMMARY:")
+            logger.info(f"   RELEVANT: {len(relevant_products)}")
+            logger.info(f"   RELATED: {len(related_products)}")
+            logger.info(f"   NOT_RELEVANT: {len(ranked_products) - len(relevant_products) - len(related_products)}")
+            logger.info("=" * 80)
             
-            logger.info(f"Validation summary: {len(relevant_products)} RELEVANT, {len(related_products)} RELATED, {len(ranked_products) - len(final_ranked)} NOT_RELEVANT")
+            logger.info(f"<<< EXITING LLM VALIDATION")
             
-            return final_ranked[:top_k]
+            # Return both lists separately (don't merge them)
+            candidates = {
+                'relevant': relevant_products[:top_k],
+                'related': related_products[:top_k]
+            }
+        else:
+            logger.info("⏭️  LLM VALIDATION SKIPPED (no specific product type detected)")
+            logger.info(f"<<< EXITING LLM VALIDATION")
+            # No validation performed - return all ranked products as 'relevant'
+            candidates = {
+                'relevant': ranked_products[:top_k],
+                'related': []
+            }
+        
+        # Final result logging
+        logger.info(">>> ENTERING RESPONSE FORMATTING")
+        logger.info("🎯" + "=" * 79)
+        logger.info(f"🎯 FINAL SEARCH RESULTS")
+        
+        if isinstance(candidates, dict):
+            relevant = candidates.get('relevant', [])
+            related = candidates.get('related', [])
+            logger.info(f"   RELEVANT products: {len(relevant)}")
+            logger.info(f"   RELATED products: {len(related)}")
             
-        logger.info(f"✓ Hybrid search returned {len(ranked_products)} products")
-        return ranked_products[:top_k]
+            if relevant:
+                logger.info("   RELEVANT product list:")
+                for idx, c in enumerate(relevant, 1):
+                    logger.info(f"      {idx}. ID={c['product_id']} | {c['name']} | Price=₹{c.get('price')}")
+            else:
+                logger.warning("   ⚠️  NO RELEVANT PRODUCTS")
+            
+            if related:
+                logger.info("   RELATED product list:")
+                for idx, c in enumerate(related, 1):
+                    logger.info(f"      {idx}. ID={c['product_id']} | {c['name']} | Price=₹{c.get('price')}")
+        else:
+            # Fallback for old format (shouldn't happen with current code)
+            logger.info(f"   Total products returned: {len(candidates)}")
+            if candidates:
+                logger.info("   Final product list:")
+                for idx, c in enumerate(candidates, 1):
+                    logger.info(f"      {idx}. ID={c['product_id']} | {c['name']} | Price=₹{c.get('price')}")
+        
+        logger.info("=" * 80)
+        logger.info(f"<<< EXITING RESPONSE FORMATTING")
+        logger.info(f"<<< EXITING search() METHOD")
+        
+        # Handle different return formats for backward compatibility
+        if return_format == 'flat':
+            # For backward compatibility (Task Tool): return only RELEVANT products as flat list
+            if isinstance(candidates, dict):
+                relevant = candidates.get('relevant', [])
+                logger.info(f"   [COMPAT] Returning flat list: {len(relevant)} RELEVANT products")
+                return relevant
+            else:
+                # Shouldn't happen, but handle gracefully
+                return candidates
+        else:
+            # Default: return dict format for external API
+            return candidates

@@ -125,7 +125,8 @@ class AlternativesTool:
                 ]
                 logger.info(f"Filter higher_rating > {source_rating} applied: {len(candidates)} candidates remaining")
                 
-            # Filter: lower_price
+            # Filter: lower_price (CHEAPER ALTERNATIVES)
+            # Hard constraint: alternative.price <= source_product.price
             # Guard: if budget_limit is set and exceeds source price, the user is
             # asking for "under X" (budget cap), not "cheaper than source".
             # The SLM sometimes conflates the two — skip lower_price in that case.
@@ -136,11 +137,12 @@ class AlternativesTool:
                 apply_lower_price = False
                 
             if apply_lower_price:
+                # Hard constraint: price <= source_price
                 candidates = [
                     c for c in candidates
-                    if float(c.get("price") or 0.0) < source_price
+                    if float(c.get("price") or 0.0) <= source_price
                 ]
-                logger.info(f"Filter lower_price < {source_price} applied: {len(candidates)} candidates remaining")
+                logger.info(f"Filter lower_price <= {source_price} applied: {len(candidates)} candidates remaining")
                 
             # Filter: different_brand
             if constraints.get("different_brand"):
@@ -246,6 +248,37 @@ class AlternativesTool:
             candidates = [c for c in candidates if c["product_id"] != source_product_id]
         elif not candidates:
             logger.info("SLM succeeded but constraints filtered all candidates. Returning empty results (no matching alternatives found).")
+        
+        # ================================================================
+        # POST-RETRIEVAL CHEAPER ALTERNATIVES FILTER
+        # When user explicitly asks for cheaper alternatives, filter by price
+        # This works even when SLM is offline (uses query text matching)
+        # ================================================================
+        if candidates and user_query:
+            # Detect "cheaper alternatives" intent from user query
+            query_lower = user_query.lower()
+            cheaper_keywords = ['cheap', 'lower price', 'lower-price', 'budget', 'affordable', 'less expensive', 'under']
+            is_cheaper_intent = any(keyword in query_lower for keyword in cheaper_keywords)
+            
+            if is_cheaper_intent:
+                source_price = float(source_product.get("price") or 0.0)
+                before_count = len(candidates)
+                
+                # Hard constraint: price <= source_price
+                candidates = [
+                    c for c in candidates
+                    if float(c.get("price") or 0.0) <= source_price
+                ]
+                
+                after_count = len(candidates)
+                logger.info("=" * 80)
+                logger.info("CHEAPER ALTERNATIVES FILTER (POST-RETRIEVAL)")
+                logger.info(f"  Detected cheaper intent from query: '{user_query}'")
+                logger.info(f"  Source product price: ₹{source_price}")
+                logger.info(f"  Candidates before filter: {before_count}")
+                logger.info(f"  Candidates after filter: {after_count}")
+                logger.info(f"  Filter: price <= {source_price}")
+                logger.info("=" * 80)
         
         # ================================================================
         # POST-RETRIEVAL SLM SUBSTITUTE VALIDATION
