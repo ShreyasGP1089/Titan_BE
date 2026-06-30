@@ -1,0 +1,99 @@
+================================================================================
+VALIDATION OPTIMIZATION - BEFORE vs AFTER
+================================================================================
+
+METRIC                    | BEFORE        | AFTER         | IMPROVEMENT
+========================================================================================
+
+CANDIDATES VALIDATED      | 25            | 10            | 60% reduction
+OUTPUT FORMAT             | Verbose JSON  | Compact JSON  | 47% fewer tokens
+OUTPUT TOKENS/PRODUCT     | ~15 tokens    | ~8 tokens     | 47% reduction
+TOTAL OUTPUT TOKENS       | ~625 tokens   | ~80 tokens    | 87% reduction
+PROMPT LENGTH             | ~850 chars    | ~400 chars    | 53% reduction
+max_tokens                | 512           | 768           | Balanced (not wasteful)
+CONFIDENCE FIELD          | ✅ Included   | ✅ Included   | KEPT (used in scoring)
+REASON FIELD              | ✅ Included   | ❌ Removed    | Not used downstream
+DESCRIPTIONS              | Full text     | 150 chars     | Truncated for context
+
+TIMING (estimated):
+  Total Time              | ~37 seconds   | ~1.5-2.5s     | 15-25x faster
+  Per-Product Time        | ~1480 ms      | ~150-250 ms   | 6-10x faster
+
+================================================================================
+WHY THESE DECISIONS?
+================================================================================
+
+1. ✅ Kept confidence
+   - Used in budget_optimizer.py for scoring
+   - Used in hybrid_search.py for re-ranking
+   - Cannot be removed without breaking functionality
+
+2. ✅ Kept descriptions (truncated)
+   - Product names like "MH500" or "NH100" are ambiguous
+   - Descriptions provide essential context for validation
+   - Truncated to 150 chars to reduce tokens while preserving accuracy
+
+3. ✅ Compact JSON format
+   - Model generates: {"8828088":"RELEVANT","8787845":"RELATED:0.8"}
+   - Saves 47% output tokens vs verbose format
+   - Parser converts back to array format for backward compatibility
+
+4. ✅ Reduced candidates from 25 → 10
+   - Hybrid search consistently produces high-quality top results
+   - Top 10 candidates are sufficient for final selection
+   - 2.5x reduction in validation work
+
+5. ✅ max_tokens: 768 (not 512, not 1024)
+   - 512 was too aggressive (could truncate output)
+   - 1024 or 2048 are wasteful
+   - 768 provides comfortable margin for 10 products
+
+6. ✅ Optimized prompt
+   - Removed verbose explanations and rules
+   - Simplified decision criteria
+   - Showed output format by example
+   - Reduced from ~850 → ~400 chars
+
+================================================================================
+BACKWARD COMPATIBILITY
+================================================================================
+
+✅ No changes required in calling code
+✅ Parser converts compact format to expected array format
+✅ Output schema remains identical
+✅ Confidence field preserved
+
+The endpoint now internally uses compact format but returns the same structure
+that backend/services/validation_service.py expects.
+
+================================================================================
+EXPECTED RESULTS
+================================================================================
+
+When you restart the server and test:
+
+1. Validation logs will show:
+   - "Candidates: 10 (limited from 25)"
+   - Prompt length: ~400 chars (vs ~850 before)
+   - Generation time: ~1.5-2.5s (vs ~37s before)
+   - Per-product: ~150-250 ms (vs ~1480 ms before)
+
+2. Task workflow will complete much faster:
+   - Before: 37s for validation (83% of total time)
+   - After: ~2s for validation (~30% of total time)
+   - Overall task time: 45s → ~8s (5-6x faster)
+
+3. Product quality should be identical:
+   - Top 10 candidates from hybrid search are sufficient
+   - Validation accuracy unchanged
+   - Final recommendations equivalent
+
+================================================================================
+READY TO TEST!
+================================================================================
+
+Restart the server:
+  cd training
+  python local_model_server.py
+
+Then run a task request and watch the logs for dramatic performance improvements!

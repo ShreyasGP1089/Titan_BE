@@ -1,0 +1,177 @@
+BUDGET OPTIMIZER: REMOVAL OF PRICE BIAS
+========================================
+
+DATE: 2026-06-26
+ISSUE: Optimizer biased toward cheapest products due to price penalty in scoring
+
+ROOT CAUSE
+----------
+The _score_product() method was computing:
+  budget_score = 1 - (price / max_price)
+
+This penalized expensive products even when budget was available,
+causing optimizer to always select cheapest options.
+
+Problem:
+- Budget was used BOTH as constraint AND in objective function
+- This double-counted price considerations
+- Result: Optimizer never used available budget efficiently
+
+SOLUTION
+--------
+Removed budget_score completely from _score_product().
+
+NEW SCORING FORMULA
+-------------------
+score = 0.6 * search_score
+      + 0.3 * validation_score
+      + 0.1 * profile_score
+
+Where:
+- search_score = product.similarity (hybrid search score)
+- validation_score = product.validation_confidence (LLM validation)
+- profile_score = product.profile_score (user profile match)
+
+NO price component in scoring!
+
+BUDGET ENFORCEMENT
+------------------
+Budget is enforced purely as a constraint in _find_best_combination():
+
+if cost + product.price <= budget:
+    # Consider this product
+else:
+    # Skip this product
+
+TIE-BREAKER
+-----------
+When multiple combinations have the same total score:
+  → Choose the one with higher total cost
+  
+Rationale:
+- User specified a budget they're willing to spend
+- If quality is equal, spending more gives better value
+- Makes better use of available budget
+
+MATHEMATICAL CLARITY
+--------------------
+
+BEFORE:
+  Objective: maximize Σ(quality_score - price_penalty)
+  Constraint: Σ(price) <= budget
+  
+  Problem: Price appears in BOTH objective and constraint
+
+AFTER:
+  Objective: maximize Σ(quality_score)
+  Constraint: Σ(price) <= budget
+  Tie-breaker: max(Σ(price)) when scores equal
+  
+  Clean separation: Quality in objective, budget in constraint
+
+EXPECTED BEHAVIOR
+-----------------
+
+Cycling task, ₹10,000 budget:
+
+BEFORE (with price penalty):
+- Optimizer scores: All products penalized by price
+- Selected: Cheapest helmet + cheapest gloves + cheapest bottle
+- Total: ~₹1,897
+- Remaining: ~₹8,103
+- Reason: Price penalty dominated the scoring
+
+AFTER (no price penalty):
+- Optimizer scores: Based on quality only
+- Selected: High-quality products within budget
+- Total: ₹5,000 - ₹9,000
+- Remaining: ₹1,000 - ₹5,000
+- Reason: Maximizes quality, uses budget efficiently
+
+EXAMPLE
+-------
+
+Products:
+  A: ₹1500, search=0.90, validation=0.85 → score = 0.60*0.90 + 0.30*0.85 + 0.10*1.0 = 0.895
+  B: ₹800,  search=0.75, validation=0.80 → score = 0.60*0.75 + 0.30*0.80 + 0.10*1.0 = 0.790
+
+With ₹5000 budget:
+  Optimizer considers both A and B
+  A has higher score (0.895 > 0.790)
+  → Selects A if it fits budget (₹1500 < ₹5000)
+  
+Result: High-quality product selected, uses more budget efficiently
+
+OLD BEHAVIOR (with price penalty):
+  A: score includes price penalty → penalized for being expensive
+  B: score includes price bonus → rewarded for being cheap
+  → Would select B even though A is higher quality
+
+CODE CHANGES
+------------
+
+File: backend/tools/budget_optimizer.py
+
+Method: _score_product()
+
+BEFORE:
+```python
+budget_score = 1.0 - (product.price / max_price)
+final_score = (0.4 * search_score
+              + 0.2 * validation_score
+              + 0.2 * profile_score
+              + 0.2 * budget_score)
+```
+
+AFTER:
+```python
+final_score = (0.6 * search_score
+              + 0.3 * validation_score
+              + 0.1 * profile_score)
+# No budget_score - price is constraint only
+```
+
+Method: _find_best_combination()
+(No changes - tie-breaker already implemented)
+
+```python
+if result_score > best_score or (result_score == best_score and result_cost > best_cost):
+    best_score = result_score
+    best_cost = result_cost
+    best_result = result
+```
+
+VERIFICATION
+------------
+
+After restarting api_swagger.py, check logs:
+
+1. "COMPUTING OPTIMIZER SCORES FOR ALL PRODUCTS"
+   - Verify scores vary based on similarity/validation/profile
+   - Higher quality products should have higher scores
+   - Scores should NOT be inversely correlated with price
+
+2. "✓ Valid combination:"
+   - Verify combinations with higher scores are preferred
+   - Verify optimizer doesn't always pick cheapest
+
+3. "🏆 BEST COMBINATION FOUND"
+   - Verify budget utilization is >50% (not 20%)
+   - Verify selected products are not all cheapest
+
+TEST COMMAND
+------------
+python3 test_optimizer_verification.py
+
+RESTART REQUIRED
+----------------
+Yes - restart api_swagger.py only (not local_model_server.py)
+
+STATUS
+------
+✅ COMPLETE
+
+Price penalty removed from scoring.
+Budget is now constraint-only.
+Tie-breaker prefers higher cost when quality equal.
+Mathematically clean separation of concerns.

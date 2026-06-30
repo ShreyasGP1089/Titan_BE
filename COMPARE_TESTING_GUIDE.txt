@@ -1,0 +1,291 @@
+COMPARISON TOOL: TESTING GUIDE
+===============================
+
+DATE: 2026-06-26
+API: http://127.0.0.1:5000
+
+QUICK TEST COMMANDS
+-------------------
+
+Test 1: Basic Comparison (Should Work)
+curl -X POST http://127.0.0.1:5000/agent \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+  -d '{
+    "query": "Compare Kiprun KD900X and Football Club Hybrid Ball"
+  }'
+
+Expected:
+- Both products resolved
+- High scores (>80)
+- No missing_products
+
+---
+
+Test 2: Size Mismatch (Graceful Degradation)
+curl -X POST http://127.0.0.1:5000/agent \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+  -d '{
+    "query": "Compare Football Ball Size 5 First Kick"
+  }'
+
+Expected:
+- Might match Size 4 if Size 5 doesn't exist
+- Score around 60-70 (with numeric mismatch penalty)
+- Product found, not "missing"
+
+---
+
+Test 3: Model ID Mandatory (Should Enforce)
+curl -X POST http://127.0.0.1:5000/agent \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+  -d '{
+    "query": "Compare Kiprun KD900X LD+ and Kiprun Rain Cap"
+  }'
+
+Expected:
+- KD900X LD+ should resolve to running shoes
+- Kiprun Rain Cap should resolve correctly
+- Should NOT substitute KD900X for Rain Cap
+- Model identifiers enforced
+
+---
+
+Test 4: Partial Results (One Product Not Found)
+curl -X POST http://127.0.0.1:5000/agent \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+  -d '{
+    "query": "Compare Kiprun KD900X and Nonexistent Product XYZ123"
+  }'
+
+Expected:
+{
+  "type": "compare",
+  "products": [
+    {
+      "product_id": "...",
+      "name": "Kiprun KD900X ...",
+      ...
+    }
+  ],
+  "missing_products": ["Nonexistent Product XYZ123"],
+  "message": "1 of 2 products could not be resolved from the knowledge base."
+}
+
+---
+
+Test 5: Version Matching (Exact Version)
+curl -X POST http://127.0.0.1:5000/agent \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+  -d '{
+    "query": "Compare Kiprun KD500 2 and Kiprun KD500 3"
+  }'
+
+Expected:
+- Two different products (if both versions exist)
+- Should NOT substitute one for the other
+- Version numbers part of model identifier
+
+---
+
+Test 6: Extra Descriptive Words (Should Handle)
+curl -X POST http://127.0.0.1:5000/agent \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+  -d '{
+    "query": "Compare Football Ball Size 5"
+  }'
+
+Expected:
+- Should match "Football Ball Training Size 5 First Kick Red"
+- Extra words in product name don't hurt score
+- Query-relative matching works
+
+---
+
+WHAT TO CHECK IN LOGS
+----------------------
+
+1. Query Parsing
+   Look for:
+   ================================================================================
+   COMPARE TOOL EXECUTION
+   Number of product mentions: 2
+   Parsed product mentions:
+     1. "Kiprun KD900X"
+     2. "Football Club Hybrid Ball"
+
+2. Product Resolution
+   Look for each product:
+   ================================================================================
+   RESOLVING PRODUCT 1: "Kiprun KD900X"
+   ================================================================================
+   → Normalizing product mention...
+     Original: "Kiprun KD900X"
+     Normalized: "kiprun kd900x"
+     Significant tokens: {'kiprun', 'kd900x'}
+     Model identifiers: ['KD900X']
+     ⚠️  MODEL IDENTIFIERS ARE MANDATORY
+
+3. Candidate Scoring
+   Look for:
+   → Scoring candidates using token overlap...
+     Top 5 matches:
+       1. Kiprun KD900X LD+ Trail Running Shoes (score: 95/100)
+       2. Kiprun KD900 Running Shoes (score: 70/100)
+       3. Kiprun Trail Shoes (score: 0/100)  <- Missing model ID
+
+4. Final Selection
+   Look for:
+   ✓ Selected best match:
+     Product: Kiprun KD900X LD+ Trail Running Shoes
+     ID: ...
+     Match score: 95/100
+
+5. Summary
+   Look for:
+   ================================================================================
+   COMPARISON RESOLUTION COMPLETE
+   Successfully resolved: 2 products
+   Failed to resolve: 0 products
+
+EXPECTED BEHAVIORS
+------------------
+
+✓ Model IDs Mandatory:
+  "Kiprun KD900X" → MUST resolve to a product with "KD900X" in name
+  Cannot match "Kiprun Rain Cap" even though brand matches
+
+✓ Query-Relative Scoring:
+  Query: "Football Ball Size 5"
+  Product: "Football Ball Training Size 5 First Kick Red"
+  → Should match (extra words in product OK)
+  Score: ~90 (100% query coverage)
+
+✓ Numeric Mismatch Penalty:
+  Query: "Size 5"
+  Product: "Size 4"
+  → Should match with -10 penalty
+  Score: ~60-70 (depending on other factors)
+  Better than "not found"
+
+✓ Partial Results:
+  One product not found → Return the ones that were found
+  Include missing_products list
+  Include helpful message
+
+✓ Version Enforcement:
+  "KD500 2" → Must match version 2
+  Cannot substitute with "KD500 3"
+
+EDGE CASES TO TEST
+------------------
+
+1. Very Generic Query
+   "Compare Football"
+   Expected: Might fail (too generic, no model ID, ambiguous)
+
+2. Multiple Numbers
+   "Compare Size 5 Pack of 3 Balls"
+   Expected: Should handle multiple descriptive numbers
+
+3. Color Differences
+   "Compare Football Ball Red and Football Ball Blue"
+   Expected: Should distinguish colors (not penalized as numeric)
+
+4. Punctuation Variations
+   "KD500-2" vs "KD500 2" vs "KD500/2"
+   Expected: All should match same product (flexible model ID matching)
+
+5. All Products Missing
+   "Compare Fake1 and Fake2"
+   Expected:
+   {
+     "products": [],
+     "missing_products": ["Fake1", "Fake2"],
+     "message": "None of the requested products could be found..."
+   }
+
+SCORING REFERENCE
+-----------------
+
+100 points: Exact normalized name match
+90 points:  100% query token coverage
+80 points:  90%+ coverage
+70 points:  80%+ coverage
+60 points:  70%+ coverage
+50 points:  60%+ coverage
+40 points:  50%+ coverage (minimum threshold)
+
+Penalties/Bonuses:
+-10: Numeric mismatch (descriptive numbers)
++5:  Model identifiers present and matched
+0:   Missing mandatory model identifier (discard)
+
+DEBUGGING TIPS
+--------------
+
+1. Check Logs First
+   Look at terminal running api_swagger.py
+   Full resolution trace for each product
+
+2. Check Token Extraction
+   Are model IDs being detected?
+   Are tokens normalized correctly?
+
+3. Check Candidate Pool
+   Are candidates being fetched?
+   "Fetched X candidate products"
+
+4. Check Scoring
+   Are scores above threshold (40)?
+   Why did top match win?
+
+5. Check Final Response
+   Are missing_products populated?
+   Is message helpful?
+
+TUNING PARAMETERS
+-----------------
+
+If matching quality isn't right, consider adjusting:
+
+1. Threshold (currently 40)
+   Location: compare_tool.py, line ~215
+   if score >= 40:  # Change this value
+
+2. Numeric Penalty (currently -10)
+   Location: compare_tool.py, line ~460
+   base_score -= 10  # Change this value
+
+3. Model ID Bonus (currently +5)
+   Location: compare_tool.py, line ~467
+   base_score = min(100, base_score + 5)  # Change this value
+
+4. Coverage Thresholds
+   Location: compare_tool.py, lines ~434-450
+   Adjust the coverage percentage breakpoints
+
+SUCCESS CRITERIA
+----------------
+
+✅ No more hallucinated products
+✅ Model IDs enforced strictly
+✅ Partial results instead of exceptions
+✅ Realistic matching for catalog variations
+✅ Clear scoring hierarchy
+✅ Helpful error messages
+
+TEST IT OUT!
+------------
+
+Start with Test 1 (basic comparison) to verify everything works.
+Then try edge cases to see how it handles difficult queries.
+Check logs for full resolution trace.
+
+API is running on: http://127.0.0.1:5000
+Ready to test! 🚀

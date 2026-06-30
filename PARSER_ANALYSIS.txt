@@ -1,0 +1,270 @@
+================================================================================
+QUERY PARSER ANALYSIS - Product Noun vs Sport/Activity Context
+================================================================================
+
+LOCATION: training/local_model_server.py
+ENDPOINT: POST /parse-query
+
+================================================================================
+CURRENT PARSER BEHAVIOR (From Training Data)
+================================================================================
+
+The parser is trained to extract:
+1. sport: The sport/activity context (Golf, Tennis, Cycling, Badminton, etc.)
+2. category_level_1: Product category (Footwear, Apparel, Equipment, etc.)
+3. keywords: The actual product nouns and descriptive terms
+4. price_limit: Budget constraint if mentioned
+
+EXAMPLES FROM TRAINING DATA:
+
+Query: "tennis shoes"
+Output: {
+  "sport": "Tennis",
+  "category_level_1": "Footwear",
+  "keywords": ["tennis", "shoes"]
+}
+
+Query: "cycling helmet under rs 4999"
+Output: {
+  "sport": "Cycling",
+  "category_level_1": "Safety Equipment",
+  "keywords": ["cycling", "helmet"],
+  "price_limit": 4999
+}
+
+Query: "badminton shoes"
+Output: {
+  "sport": "Badminton",
+  "category_level_1": "Footwear",
+  "keywords": ["badminton", "shoes"]
+}
+
+Query: "running shorts within 2000"
+Output: {
+  "sport": "Running",
+  "category_level_1": "Apparel",
+  "keywords": ["running", "shorts"],
+  "price_limit": 2000
+}
+
+Query: "golf balls"
+Output: {
+  "sport": "Golf",
+  "category_level_1": "Balls",
+  "keywords": ["golf", "ball"]
+}
+
+================================================================================
+OBSERVED PATTERN
+================================================================================
+
+The parser currently includes BOTH:
+- The sport modifier ("tennis", "cycling", "badminton")
+- The product noun ("shoes", "helmet", "shorts")
+
+in the keywords array.
+
+This is actually CORRECT behavior because:
+1. Hybrid search uses keywords for matching
+2. Including "tennis shoes" helps find tennis-specific shoes
+3. The "sport" field provides additional filtering context
+4. The product noun is preserved (not replaced by sport name)
+
+================================================================================
+EXPECTED vs ACTUAL BEHAVIOR
+================================================================================
+
+EXPECTED (User's Request):
+Query: "I want shorts to play golf"
+Desired Output: {
+  "sport": "Golf",
+  "category_level_1": "Apparel",
+  "keywords": ["shorts"]
+}
+
+ACTUAL (Current Training):
+Query: "running shorts"
+Output: {
+  "sport": "Running",
+  "category_level_1": "Apparel",
+  "keywords": ["running", "shorts"]
+}
+
+Query: "golf balls"
+Output: {
+  "sport": "Golf",
+  "category_level_1": "Balls",
+  "keywords": ["golf", "ball"]
+}
+
+DIFFERENCE:
+- Expected: keywords = ["shorts"] (product noun only)
+- Actual: keywords = ["running", "shorts"] (sport modifier + product noun)
+
+================================================================================
+IS THIS A PROBLEM?
+================================================================================
+
+CURRENT BEHAVIOR:
+keywords = ["tennis", "shoes"]
+
+PROS:
+✅ Hybrid search finds "tennis shoes" specifically
+✅ More precise results (tennis shoes vs generic shoes)
+✅ Semantic search benefits from sport context
+✅ Keyword search matches product descriptions containing "tennis shoes"
+
+CONS:
+❌ If "tennis" is weighted too heavily, might miss good shoes suitable for tennis
+❌ Could be overly restrictive in some cases
+
+EXPECTED BEHAVIOR:
+keywords = ["shoes"], sport = "Tennis"
+
+PROS:
+✅ Broader search (finds all shoes)
+✅ Sport field can be used for metadata filtering
+✅ More flexible for products that work across sports
+
+CONS:
+❌ May return too many generic results
+❌ Loses sport-specific context in keyword search
+❌ Hybrid search might miss sport-specific products
+
+================================================================================
+RECOMMENDED APPROACH
+================================================================================
+
+The IDEAL behavior depends on your search architecture:
+
+OPTION 1: Keep current behavior (keywords include sport modifier)
+- Best if: Hybrid search is primary ranking mechanism
+- Use case: "tennis shoes" should prioritize tennis-specific footwear
+- Implementation: No changes needed (current training is correct)
+
+OPTION 2: Separate sport from product noun
+- Best if: You want to filter by sport in database query separately
+- Use case: "shoes" + filter(sport="Tennis") in SQL/database layer
+- Implementation: Retrain parser to exclude sport modifier from keywords
+
+================================================================================
+TESTING THE CURRENT PARSER
+================================================================================
+
+To verify current behavior, test these queries:
+
+1. "shorts for golf"
+   Expected: sport="Golf", keywords=["shorts"] or ["golf", "shorts"]?
+
+2. "shoes for badminton"
+   Expected: sport="Badminton", keywords=["shoes"] or ["badminton", "shoes"]?
+
+3. "helmet for cycling"
+   Expected: sport="Cycling", keywords=["helmet"] or ["cycling", "helmet"]?
+
+4. "backpack for hiking"
+   Expected: sport="Hiking", keywords=["backpack"] or ["hiking", "backpack"]?
+
+Run these queries through /parse-query and check the output.
+
+If keywords include the sport modifier, current behavior matches training.
+If keywords exclude the sport modifier, parser is already doing what you want.
+
+================================================================================
+ARCHITECTURE CONSIDERATION
+================================================================================
+
+CURRENT FLOW:
+User Query: "tennis shoes"
+     ↓
+Parser: sport="Tennis", keywords=["tennis", "shoes"]
+     ↓
+Hybrid Search: Search for "tennis shoes" (keyword + semantic)
+     ↓
+Database: WHERE name/description MATCH "tennis shoes"
+     ↓
+Validator: Classify results as RELEVANT/RELATED
+
+ALTERNATIVE FLOW:
+User Query: "tennis shoes"
+     ↓
+Parser: sport="Tennis", keywords=["shoes"]
+     ↓
+Hybrid Search: Search for "shoes" (broader)
+     ↓
+Database: WHERE (name/description MATCH "shoes") AND (sport="Tennis")
+     ↓
+Validator: Classify results as RELEVANT/RELATED
+
+The ALTERNATIVE flow requires:
+- Parser to exclude sport modifier from keywords
+- Database query to filter by sport field
+- Potentially more results to validate
+
+The CURRENT flow:
+- Parser includes sport modifier in keywords
+- Hybrid search naturally finds sport-specific products
+- Fewer but more precise candidates
+
+================================================================================
+RECOMMENDATION
+================================================================================
+
+1. TEST CURRENT BEHAVIOR
+   - Send queries like "shorts for golf", "shoes for badminton"
+   - Check what keywords are extracted
+   - Verify if product noun is preserved
+
+2. IF PARSER ALREADY SEPARATES SPORT AND PRODUCT:
+   - No changes needed
+   - Document the correct behavior
+
+3. IF PARSER INCLUDES SPORT IN KEYWORDS:
+   - Evaluate if this is actually problematic
+   - Current behavior may be beneficial for precision
+   - Only retrain if you want broader search + sport filtering
+
+4. HYBRID SEARCH CONSIDERATION:
+   - If hybrid search works well with current keywords, keep it
+   - If results are too narrow, consider separating sport from keywords
+   - Validator already handles RELEVANT vs RELATED classification
+
+================================================================================
+KEY PRINCIPLE
+================================================================================
+
+The parser should NEVER replace the product noun with the sport name.
+
+BAD:
+Query: "shorts for golf"
+Output: keywords=["golf"]  ❌ (lost "shorts")
+
+GOOD:
+Query: "shorts for golf"
+Output: keywords=["shorts"] ✅
+OR
+Output: keywords=["golf", "shorts"] ✅ (both preserved)
+
+As long as the product noun ("shorts", "shoes", "helmet") appears in keywords,
+the parser is doing its job correctly!
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+1. Test the current parser with these queries:
+   - "shorts for golf"
+   - "shoes for badminton"
+   - "helmet for cycling"
+   - "backpack for hiking"
+
+2. Check the extracted keywords array
+
+3. Verify product noun is present in keywords
+
+4. If product noun is missing → Parser needs fixing
+   If product noun is present → Parser is working correctly
+
+5. Document actual behavior and decide if changes are needed
+
+The training data shows correct patterns - need to verify runtime behavior!

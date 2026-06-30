@@ -1,0 +1,262 @@
+TASK + BUDGET WORKFLOW: PERFORMANCE PROFILING
+==============================================
+
+DATE: 2026-06-26
+STATUS: ✅ IMPLEMENTED
+
+OBJECTIVE
+---------
+
+Add comprehensive performance profiling to identify bottlenecks in Task + Budget workflow.
+
+NO logic changes - only instrumentation and logging.
+
+CHANGES MADE
+------------
+
+**File**: backend/tools/task_tool.py
+
+**Added**: 
+- `import time` for timestamp tracking
+- Performance timing for every major stage
+- Detailed per-item breakdowns
+- Search statistics
+- Validation statistics
+- Overall performance summary
+
+NO MODIFICATIONS TO:
+-------------------
+
+✅ Product Discovery logic
+✅ Hybrid Search algorithm
+✅ Ranking algorithm
+✅ Validation logic
+✅ Budget optimization algorithm
+✅ Retrieval pipeline
+✅ Local Model prompts
+✅ Local Model Server
+✅ API response schemas
+
+ONLY instrumentation added - no behavioral changes.
+
+PROFILING OUTPUT FORMAT
+-----------------------
+
+For every task request, the logs now show:
+
+1. TASK PARSING
+```
+Task Parsing
+  Start: 1234567890.123
+  End: 1234567890.145
+  Duration: 22.0 ms
+```
+
+2. PER-ITEM BREAKDOWN
+```
+------------------------------------------------------------
+ITEM 1/4: Bicycle Helmet
+------------------------------------------------------------
+Search Duration: 450.2 ms
+Candidates Retrieved: 15
+Validation Duration: 12.3 ms
+Candidates Validated: 12
+Candidates Rejected: 3
+Validation Success Rate: 12/15 (80.0%)
+✓ Item 'Bicycle Helmet' complete
+```
+
+3. BUDGET OPTIMIZATION
+```
+Budget Optimization
+  Start: 1234567891.500
+  Budget: ₹10000
+  End: 1234567891.518
+  Duration: 18.0 ms
+```
+
+4. PERFORMANCE SUMMARY
+```
+====================================================================
+PERFORMANCE SUMMARY
+====================================================================
+Task Parsing: 22.0 ms
+Retrieval: 1850.5 ms (30.5%)
+Validation: 48.9 ms (0.8%)
+Budget Optimization: 18.0 ms (0.3%)
+Response Formatting: 2.1 ms
+------------------------------------------------------------
+TOTAL TASK TIME: 6080.0 ms
+====================================================================
+
+SEARCH STATISTICS
+====================================================================
+Total Products Retrieved: 60
+Total Products Validated: 48
+Total Products Rejected: 12
+Overall Validation Rate: 48/60 (80.0%)
+====================================================================
+
+PER-ITEM BREAKDOWN
+====================================================================
+Bicycle Helmet
+  Search: 450.2 ms
+  Validation: 12.3 ms
+  Retrieved: 15
+  Validated: 12
+  Rejected: 3
+  Success Rate: 12/15 (80.0%)
+Cycling Gloves
+  Search: 420.8 ms
+  Validation: 10.5 ms
+  Retrieved: 15
+  Validated: 12
+  Rejected: 3
+  Success Rate: 12/15 (80.0%)
+Water Bottle
+  Search: 480.5 ms
+  Validation: 14.1 ms
+  Retrieved: 15
+  Validated: 12
+  Rejected: 3
+  Success Rate: 12/15 (80.0%)
+Bicycle Pump
+  Search: 499.0 ms
+  Validation: 12.0 ms
+  Retrieved: 15
+  Validated: 12
+  Rejected: 3
+  Success Rate: 12/15 (80.0%)
+====================================================================
+```
+
+METRICS CAPTURED
+----------------
+
+1. **Timing**
+   - Task parsing duration
+   - Per-item search duration
+   - Per-item validation duration
+   - Budget optimization duration
+   - Response formatting duration
+   - Total task time
+
+2. **Percentages**
+   - Retrieval % of total time
+   - Validation % of total time
+   - Budget optimization % of total time
+
+3. **Search Statistics**
+   - Total products retrieved across all items
+   - Total products validated
+   - Total products rejected
+   - Overall validation success rate
+
+4. **Per-Item Statistics**
+   - Candidates retrieved
+   - Candidates validated
+   - Candidates rejected
+   - Validation success rate
+
+WHAT WE CAN NOW IDENTIFY
+-------------------------
+
+✅ Is validation the bottleneck?
+   - Check "Validation: X ms (Y%)" in summary
+   - If Y > 50%, validation is the bottleneck
+
+✅ Are products being validated multiple times?
+   - Currently no (validation happens once per product in task tool)
+   - Would show up as high validation time relative to product count
+
+✅ Are searches repeated unnecessarily?
+   - Currently no (each item searched once)
+   - Would show in logs if same item searched multiple times
+
+✅ Is budget optimizer triggering additional searches?
+   - Check "Budget Optimization: X ms" 
+   - Currently no additional searches (only re-ranks existing results)
+
+✅ Is Local Model responsible for latency?
+   - Compare with Product Discovery (which uses same search pipeline)
+   - If Task is slower, check which component differs
+
+✅ Is retrieval the bottleneck?
+   - Check "Retrieval: X ms (Y%)" in summary
+   - If Y > 50%, hybrid search/database is the bottleneck
+
+EXAMPLE ANALYSIS
+----------------
+
+Scenario 1: Validation is bottleneck
+```
+Retrieval: 800 ms (13%)
+Validation: 5100 ms (85%)
+Budget: 18 ms (0.3%)
+```
+→ Validation taking 85% of time
+→ Need to optimize SLM validation calls or caching
+
+Scenario 2: Retrieval is bottleneck
+```
+Retrieval: 4500 ms (75%)
+Validation: 800 ms (13%)
+Budget: 18 ms (0.3%)
+```
+→ Database/search taking 75% of time
+→ Need to optimize hybrid search or database queries
+
+Scenario 3: Balanced
+```
+Retrieval: 1800 ms (30%)
+Validation: 1200 ms (20%)
+Budget: 18 ms (0.3%)
+Other: 3000 ms (50%)
+```
+→ Time distributed - check "Other" (parsing, formatting, network)
+
+TESTING
+-------
+
+To see profiling output, run a task request:
+
+```bash
+curl -X POST http://127.0.0.1:5000/api/v1/debug/task \
+  -H "Content-Type: application/json" \
+  -H "Api-Key: decathlon_smart_search_2024_secure_key_abc123xyz" \
+  -d '{
+    "activity": "Cycling",
+    "budget": 10000
+  }'
+```
+
+Check the API logs for the PERFORMANCE SUMMARY output.
+
+NOTES
+-----
+
+- All timing uses `time.time()` for consistent measurement
+- Durations converted to milliseconds for readability
+- Percentages show proportion of total task time
+- Per-item breakdowns help identify specific slow items
+
+NEXT STEPS
+----------
+
+1. ✅ Profiling implemented
+2. ⏳ Run task requests and capture logs
+3. ⏳ Analyze performance summaries
+4. ⏳ Identify true bottleneck
+5. ⏳ Make targeted optimizations based on data
+
+NO OPTIMIZATIONS YET - only measurement and logging!
+
+STATUS
+------
+
+✅ Performance profiling complete
+✅ API server restarted with instrumentation
+✅ Ready to analyze task performance
+✅ Zero logic changes - pure instrumentation
+
+Run task requests to see detailed performance breakdowns! 📊

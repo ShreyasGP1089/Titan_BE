@@ -1,0 +1,289 @@
+COMPARISON TOOL: INDEPENDENT PRODUCT RESOLUTION FIX
+===================================================
+
+DATE: 2026-06-26
+ISSUE: Comparison returning unrelated products instead of requested items
+
+PROBLEM STATEMENT
+-----------------
+Query: "Compare Kiprun KD900X LD+ and Kiprun KD500 2"
+Expected: Two Kiprun running shoes
+Actual: Unrelated KIPRUN products (T-shirt, Visor, etc.)
+
+ROOT CAUSE
+----------
+The comparison tool was using a flawed resolution approach:
+1. Extracted keywords from product mentions (e.g., ["kiprun", "kd900x", "ld+"])
+2. Searched database using those keywords
+3. Could match ANY product with those keywords
+4. Often matched unrelated products from same brand
+
+The issue: Keyword extraction lost context. "Kiprun" alone could match
+any Kiprun product (shirts, visors, accessories), not just the specific
+running shoe model requested.
+
+SOLUTION
+--------
+Complete rewrite to use Product Discovery pipeline for resolution.
+
+NEW FLOW:
+User Query: "Compare Kiprun KD900X LD+ and Kiprun KD500 2"
+     ↓
+Parse comparison request (api_swagger.py)
+     ↓
+Extract product mentions:
+  1. "Kiprun KD900X LD+  "
+  2. "Kiprun KD500 2"
+     ↓
+For EACH mention independently:
+  → Call Product Discovery with FULL mention
+  → Use hybrid search (semantic + keyword + validation)
+  → Select top RELEVANT product
+     ↓
+Return resolved products for comparison
+
+KEY PRINCIPLE:
+Each product mention is a mini-search query.
+Use the FULL Product Discovery pipeline, not keyword extraction.
+
+IMPLEMENTATION
+--------------
+
+File: backend/tools/compare_tool.py
+
+1. Updated execute() method
+   - Enhanced logging to show parsed product mentions
+   - Calls new _resolve_product_via_discovery() for each mention
+   - Logs resolution results for each product
+
+2. Added _resolve_product_via_discovery() method
+   - Takes FULL product mention as input
+   - First checks if it's a direct product ID
+   - Otherwise, calls Product Discovery (HybridSearchService)
+   - Uses full mention as keywords (not extracted subset)
+   - Returns top RELEVANT product (not RELATED)
+   - Comprehensive logging at each step
+
+3. Kept _resolve_product() method
+   - Legacy method for backward compatibility
+   - Not used by compare tool anymore
+   - May be used by other tools (alternatives_tool)
+
+CODE CHANGES
+------------
+
+OLD APPROACH:
+```python
+def _resolve_product(self, p_ref: str):
+    # Extract keywords
+    words = p_ref.split()
+    
+    # Search with keywords
+    candidates = search_by_keywords(words)
+    
+    # Score and pick best
+    best = max(candidates, key=score)
+    return best
+```
+
+Problem: Loses context, matches generic products
+
+NEW APPROACH:
+```python
+def _resolve_product_via_discovery(self, product_mention: str, mention_index: int):
+    # Check if direct product ID
+    if is_product_id(product_mention):
+        return get_by_id(product_mention)
+    
+    # Use Product Discovery with FULL mention
+    keywords = product_mention.split()  # Keep ALL words
+    
+    result = search_service.search(
+        sport=None,           # Search all sports
+        category_level_1=None,  # Search all categories
+        keywords=keywords,    # Use FULL mention
+        top_k=5,
+        return_format='dict'
+    )
+    
+    # Return top RELEVANT product
+    relevant_products = result.get('relevant', [])
+    return relevant_products[0]  # Best match
+```
+
+Advantage: Uses same pipeline as regular search, maintains context
+
+LOGGING ADDED
+-------------
+
+The tool now logs:
+
+1. COMPARE TOOL EXECUTION
+   - Number of product mentions
+   - Each parsed mention listed
+
+2. RESOLVING PRODUCT [N]
+   - Full mention being resolved
+   - Direct ID check result
+   - Product Discovery call details
+   - Keywords extracted
+   - Number of RELEVANT products returned
+   - All candidates with scores
+   - Selected product details
+
+3. COMPARISON RESOLUTION COMPLETE
+   - All resolved product IDs
+   - Summary of resolution
+
+Example Log Output:
+```
+================================================================================
+COMPARE TOOL EXECUTION
+Number of product mentions: 2
+Parsed product mentions:
+  1. "Kiprun KD900X LD+"
+  2. "Kiprun KD500 2"
+================================================================================
+
+================================================================================
+RESOLVING PRODUCT 1: "Kiprun KD900X LD+"
+================================================================================
+→ Attempting direct product ID lookup...
+✗ Not a product ID, proceeding with Product Discovery search...
+→ Calling Product Discovery with query: "Kiprun KD900X LD+"
+  Extracted keywords: ['Kiprun', 'KD900X', 'LD+']
+  Product Discovery returned 3 RELEVANT products
+  Candidates returned:
+    1. Kiprun KD900X LD+ Running Shoes (ID: abc123, score: 0.920)
+    2. Kiprun KD900 Running Shoes (ID: abc124, score: 0.850)
+    3. Kiprun KD Plus Running Shoes (ID: abc125, score: 0.780)
+✓ Selected top-ranked product:
+  Product: Kiprun KD900X LD+ Running Shoes
+  ID: abc123
+  Score: 0.920
+✓ Product 1 resolved:
+    Input: "Kiprun KD900X LD+"
+    Resolved to: Kiprun KD900X LD+ Running Shoes
+    Product ID: abc123
+    Price: ₹8999
+
+[... Product 2 resolution logs ...]
+
+================================================================================
+COMPARISON RESOLUTION COMPLETE
+Successfully resolved all 2 products
+Resolved product IDs: ['abc123', 'def456']
+================================================================================
+```
+
+BENEFITS
+--------
+
+1. Accurate Resolution
+   - Uses full Product Discovery pipeline
+   - Maintains context of full product mention
+   - Hybrid search ensures relevance
+
+2. Independent Resolution
+   - Each product mention resolved separately
+   - No mixing of product names
+   - No brand-only searches
+
+3. Consistent with Search
+   - Uses same HybridSearchService
+   - Same semantic ranking
+   - Same validation logic
+   - Consistent user experience
+
+4. Better Debugging
+   - Comprehensive logging at each step
+   - Can verify each resolution independently
+   - Clear indication of what was searched
+
+EXPECTED BEHAVIOR
+-----------------
+
+Query: "Compare Kiprun KD900X LD+ and Kiprun KD500 2"
+
+BEFORE (Broken):
+  Search 1: "kiprun" → Matches any Kiprun product
+  Result: Kiprun T-shirt
+  
+  Search 2: "kiprun" → Matches any Kiprun product
+  Result: Kiprun Visor
+  
+  Comparison: T-shirt vs Visor ❌
+
+AFTER (Fixed):
+  Search 1: "Kiprun KD900X LD+" → Full Product Discovery
+  Result: Kiprun KD900X LD+ Running Shoes ✓
+  
+  Search 2: "Kiprun KD500 2" → Full Product Discovery
+  Result: Kiprun KD500 2 Running Shoes ✓
+  
+  Comparison: Running Shoe vs Running Shoe ✓
+
+TESTING
+-------
+
+Run: python3 test_compare_kiprun_shoes.py
+
+This test will:
+1. Simulate comparison request for two Kiprun shoes
+2. Show detailed resolution logs
+3. Verify correct products are returned
+4. Check that products are shoes (not unrelated items)
+5. Provide verification checklist
+
+VERIFICATION CHECKLIST
+----------------------
+
+After running the test, verify in logs:
+
+✓ Parsed product mentions shown separately
+✓ Each product resolved independently
+✓ Product Discovery called for each with full mention
+✓ RELEVANT products returned (not RELATED)
+✓ Top-ranked product selected from each search
+✓ Final products are correct type (shoes, not accessories)
+
+EDGE CASES HANDLED
+------------------
+
+1. Direct Product ID
+   - If mention is a product ID, resolve directly
+   - No need for Product Discovery search
+
+2. No Results Found
+   - Clear error message with product mention
+   - Suggests user to check product name
+
+3. Multiple Matches
+   - Returns top-ranked by hybrid score
+   - Logs all candidates for debugging
+
+4. Ambiguous Mentions
+   - Product Discovery handles via validation
+   - Returns best match based on relevance
+
+BACKWARD COMPATIBILITY
+----------------------
+
+✓ API schema unchanged (CompareArguments still accepts List[str])
+✓ Response schema unchanged (CompareResponse)
+✓ Legacy _resolve_product() kept for other tools
+✓ Only resolution method changed, not interface
+
+RESTART REQUIRED
+----------------
+
+Yes - restart api_swagger.py only (not local_model_server.py)
+
+STATUS
+------
+✅ COMPLETE
+
+Each product mention now resolved independently via Product Discovery.
+Full context maintained throughout resolution.
+Accurate product matching using hybrid search.
+Comprehensive logging for debugging.

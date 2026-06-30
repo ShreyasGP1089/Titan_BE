@@ -1,0 +1,231 @@
+COMPATIBILITY LAYER ARCHITECTURE
+=================================
+
+OVERVIEW
+--------
+The compatibility layer allows different consumers to receive product search
+results in the format they need, without changing the underlying pipeline.
+
+ARCHITECTURE DIAGRAM
+--------------------
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         HYBRID SEARCH PIPELINE                           │
+│                                                                           │
+│  User Query → SQL Retrieval → Semantic Search → Hybrid Ranking →        │
+│  LLM Validation → Result Separation                                      │
+│                                                                           │
+│  Internal format: {'relevant': [...], 'related': [...]}                  │
+└─────────────────────────┬───────────────────────────────────────────────┘
+                          │
+                          │ return_format parameter
+                          │
+          ┌───────────────┴───────────────┐
+          │                               │
+          ▼                               ▼
+  return_format='dict'           return_format='flat'
+          │                               │
+          │                               │
+┌─────────▼─────────────┐       ┌─────────▼──────────────┐
+│   EXTERNAL API PATH   │       │   INTERNAL TOOL PATH   │
+│                       │       │                        │
+│  SearchTool.execute() │       │  TaskTool.execute()    │
+│         │             │       │         │              │
+│         ▼             │       │         ▼              │
+│  SearchResponse       │       │  Flat List[Product]    │
+│  {                    │       │  [                     │
+│    products: [...]    │       │    {product1},         │
+│    related: [...]     │       │    {product2},         │
+│    total: N           │       │    ...                 │
+│    related_total: M   │       │  ]                     │
+│  }                    │       │                        │
+└───────────────────────┘       └────────────────────────┘
+          │                               │
+          ▼                               ▼
+    Frontend UI                   Budget Optimizer
+    - Shows RELEVANT               Profile Scoring
+      products separately          Item Validation
+    - Shows RELATED                (No awareness of
+      products separately           RELATED products)
+
+
+DATA FLOW COMPARISON
+--------------------
+
+BEFORE (Task 1-5):
+  HybridSearch.search() → List[Dict] (flat list)
+  ↓
+  All tools receive same flat list
+  ↓
+  SearchTool wraps in SearchResponse
+  TaskTool processes directly
+
+AFTER (Task 6):
+  HybridSearch.search(return_format) → Dict or List based on format
+  ↓                                      ↓
+  return_format='dict'                   return_format='flat'
+  ↓                                      ↓
+  {'relevant': [...],                    [product1, product2, ...]
+   'related': [...]}                     (RELEVANT only)
+  ↓                                      ↓
+  SearchTool → SearchResponse            TaskTool → processes as before
+  (products + related)                   (backward compatible)
+
+
+CALL PATTERNS
+-------------
+
+1. EXTERNAL API (Product Discovery)
+   
+   search_tool.py:
+   ```python
+   result = self.search_service.search(
+       sport=request.sport,
+       keywords=request.keywords,
+       return_format='dict'  # ← New parameter
+   )
+   # result = {'relevant': [...], 'related': [...]}
+   
+   response = SearchResponse(
+       products=relevant_objects,      # RELEVANT products
+       related=related_objects,        # RELATED products
+       total=len(relevant_objects),
+       related_total=len(related_objects)
+   )
+   ```
+
+2. INTERNAL TOOLS (Task Tool)
+   
+   task_tool.py:
+   ```python
+   products = self.search_service.search(
+       sport=sport,
+       keywords=keywords,
+       return_format='flat'  # ← New parameter
+   )
+   # products = [product1, product2, ...] (RELEVANT only)
+   
+   # Rest of code unchanged - processes flat list as before
+   for product in products:
+       # validate, score, rank...
+   ```
+
+
+BACKWARD COMPATIBILITY GUARANTEES
+----------------------------------
+
+✓ Task Tool receives same data structure as before Task 4
+✓ Task Tool logic (validation, scoring, budget) unchanged
+✓ Task Tool has no awareness of RELATED products
+✓ External API exposes new structured format (products + related)
+✓ No changes to retrieval, semantic search, ranking, or validation
+✓ No database schema changes
+✓ No breaking changes to existing functionality
+
+
+VALIDATION WORKFLOW COMPARISON
+-------------------------------
+
+BEFORE TASK 4:
+  Validator → [RELEVANT, RELATED, NOT_RELEVANT]
+  ↓
+  Merge RELEVANT + RELATED into single list
+  ↓
+  Return merged list to all consumers
+
+AFTER TASK 4:
+  Validator → [RELEVANT, RELATED, NOT_RELEVANT]
+  ↓
+  Keep RELEVANT and RELATED separate
+  ↓
+  Return {'relevant': [...], 'related': [...]}
+
+AFTER TASK 6 (with compatibility):
+  Validator → [RELEVANT, RELATED, NOT_RELEVANT]
+  ↓
+  Keep RELEVANT and RELATED separate
+  ↓
+  Caller specifies format:
+  - return_format='dict' → {'relevant': [...], 'related': [...]}
+  - return_format='flat' → [...] (RELEVANT only, backward compatible)
+
+
+TESTING STRATEGY
+----------------
+
+Test 1: Direct search() call with dict format
+  → Verify returns dict with 'relevant' and 'related' keys
+  → Verify both lists contain correct products
+
+Test 2: Direct search() call with flat format
+  → Verify returns flat list (not dict)
+  → Verify list contains only RELEVANT products
+
+Test 3: SearchTool.execute()
+  → Verify SearchResponse has products + related fields
+  → Verify counts match (total, related_total)
+
+Test 4: TaskTool.execute()
+  → Verify receives flat list of products
+  → Verify no awareness of RELATED products
+  → Verify validation logic works as before
+
+
+ERROR HANDLING
+--------------
+
+If validator is offline:
+  - Keyword fallback returns {'relevant': [...], 'related': []}
+  - return_format='flat' returns [...] (RELEVANT only)
+
+If no candidates found:
+  - return_format='dict' → {'relevant': [], 'related': []}
+  - return_format='flat' → []
+
+If invalid return_format passed:
+  - Defaults to 'dict' (safe fallback)
+
+
+FUTURE EXTENSIONS
+-----------------
+
+New tools can choose format based on needs:
+
+1. Tools needing separation (like frontend):
+   - Use return_format='dict'
+   - Get structured {'relevant': [...], 'related': [...]}
+
+2. Tools treating all products equally (like recommendation engine):
+   - Use return_format='flat'
+   - Get simple list of RELEVANT products
+
+3. Tools wanting full control:
+   - Use return_format='dict'
+   - Merge or separate as needed in tool logic
+
+
+DESIGN PRINCIPLES
+-----------------
+
+1. Single Source of Truth
+   - Pipeline produces one canonical format internally
+   - Adapter layer provides different views
+
+2. Backward Compatibility
+   - Existing tools continue working without changes
+   - New format opt-in via parameter
+
+3. Separation of Concerns
+   - Pipeline: high-quality retrieval + validation
+   - Adapter: format transformation
+   - Tools: business logic
+
+4. Minimal Changes
+   - Only 3 files modified
+   - No database changes
+   - No API schema changes (already done in Task 4)
+
+5. Explicit Over Implicit
+   - Caller explicitly requests format
+   - No magic detection or guessing
+   - Clear intent in code

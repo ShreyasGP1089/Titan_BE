@@ -1,0 +1,383 @@
+COMPARISON TOOL: IMPLEMENTATION STATUS
+======================================
+
+DATE: 2026-06-26
+STATUS: ✅ COMPLETE - READY FOR TESTING
+
+EVOLUTION SUMMARY
+-----------------
+
+Iteration 1 (Abandoned): Product Discovery Pipeline
+  - Too flexible, semantic search caused hallucinations
+  - Would match unrelated products
+
+Iteration 2 (Abandoned): Exact String Matching
+  - Too strict, threw exceptions immediately
+  - "Size 5 Machine-Stitched Football" wouldn't match anything
+
+Iteration 3 (Implemented): Mandatory Model IDs
+  - Model identifiers (KD900X, MT500, etc.) became mandatory
+  - Candidates missing ANY model ID → score 0
+  - Brand similarity cannot compensate
+  - Token-based scoring with normalization
+
+Iteration 4 (Current - COMPLETE): Query-Relative Token Scoring
+  - Overlap calculated as: matched_query_tokens / total_query_tokens
+  - Extra product tokens DON'T reduce score
+  - Numeric mismatches: -10 penalty (not discard), except model ID numbers
+  - Partial results support with missing_products list
+  - Updated CompareResponse schema
+
+CURRENT IMPLEMENTATION DETAILS
+-------------------------------
+
+**File**: backend/tools/compare_tool.py
+**Method**: _score_token_match()
+
+**Scoring Algorithm**:
+
+Step 1: Mandatory Model Identifier Check
+  if model_identifiers exist in query:
+    for each model_id:
+      if model_id NOT in product name:
+        return 0  // Discard immediately
+  
+  Brand similarity NEVER compensates for missing model IDs
+
+Step 2: Calculate Query Coverage
+  matched_tokens = query_tokens ∩ product_tokens
+  coverage = len(matched_tokens) / len(query_tokens)
+  
+  Key insight: Extra product tokens don't hurt score
+
+Step 3: Base Score from Coverage
+  100% coverage → 90 points
+   90% coverage → 80 points
+   80% coverage → 70 points
+   70% coverage → 60 points
+   60% coverage → 50 points
+   50% coverage → 40 points (minimum threshold)
+   <50% coverage → 0 points
+
+Step 4: Apply Numeric Mismatch Penalty
+  Extract numbers from query and product
+  Identify model ID numbers (part of mandatory identifiers)
+  Identify descriptive numbers (size, age, quantity)
+  
+  if descriptive_numbers differ:
+    score -= 10  // Soft penalty, not discard
+  
+  Model ID numbers are mandatory (already checked in Step 1)
+
+Step 5: Model ID Bonus
+  if model_identifiers present and ALL matched:
+    score += 5  // Small boost for confirmed model match
+
+**Threshold**: 40 points minimum
+
+SCHEMA CHANGES
+--------------
+
+**File**: backend/models/schemas.py
+
+class CompareResponse(BaseModel):
+    type: Literal["compare"] = "compare"
+    products: List[Product]  # Successfully resolved products
+    missing_products: List[str] = Field(default_factory=list)  # Could not resolve
+    message: Optional[str] = None  # Error message if any missing
+
+**Behavior**:
+- No longer throws exception if one product missing
+- Returns partial results
+- Frontend can show helpful message
+- User knows which specific product failed
+
+EXAMPLES
+--------
+
+Example 1: Extra Descriptive Tokens
+Query: "Football Ball Size 5 First Kick"
+  Tokens: {football, ball, size, 5, first, kick}  // 6 tokens
+
+Product: "Football Ball Training Size 4 Age 8 to 12 years First Kick Red"
+  Tokens: {football, ball, training, size, 4, age, 8, to, 12, years, first, kick, red}  // 13 tokens
+
+Matched query tokens: {football, ball, size, first, kick}  // 5/6
+Coverage: 83%
+Base score: 70
+Numeric mismatch (5 vs 4): -10
+Final score: 60 ✓
+
+Result: MATCH (reasonable, best available if no Size 5)
+
+Example 2: Model Identifier Mandatory
+Query: "Kiprun KD900X LD+"
+  Model IDs: ["KD900X", "LD"]
+
+Candidate A: "Kiprun KD900X LD+ Trail Running Shoes"
+  Has KD900X? ✓
+  Has LD? ✓
+  Coverage: 4/4 = 100%
+  Score: 90 + 5 (model bonus) = 95 ✓
+
+Candidate B: "KIPRUN Running Rain Cap"
+  Has KD900X? ✗
+  Score: 0 (discard immediately)
+
+Example 3: Version Matching
+Query: "Kiprun KD500 2" (version 2)
+  Model IDs: ["KD500", "KD500 2"]
+
+Product: "Kiprun KD500 3 Running Shoes"
+  Has KD500? ✓
+  Has "KD500 2"? ✗ (has "KD500 3" instead)
+  Score: 0 (version is part of model identifier)
+
+Result: "Product not found" (better than silently substituting KD500 3)
+
+Example 4: Partial Results
+Query: Compare "Kiprun KD900X" and "Size 5 Machine-Stitched Football"
+
+Resolution:
+- "Kiprun KD900X" → ✓ Found
+- "Size 5 Machine-Stitched Football" → ✗ Not found (no matching product)
+
+Response:
+{
+  "type": "compare",
+  "products": [
+    {
+      "product_id": "...",
+      "name": "Kiprun KD900X LD+ Trail Running Shoes",
+      ...
+    }
+  ],
+  "missing_products": [
+    "Size 5 Machine-Stitched Football"
+  ],
+  "message": "1 of 2 products could not be resolved from the knowledge base."
+}
+
+Frontend can show:
+  "Found: Kiprun KD900X LD+ Trail Running Shoes
+   Not found: Size 5 Machine-Stitched Football
+   
+   Please check the product name and try again."
+
+NUMERIC HANDLING
+----------------
+
+Two categories of numbers:
+
+1. Model ID Numbers (MANDATORY)
+   Examples: "900" in KD900X, "500" in MT500
+   Rule: Must match exactly
+   Missing → Score 0
+
+2. Descriptive Numbers (SOFT)
+   Examples: Size (5), Age (8-12), Quantity (3)
+   Rule: Mismatch → -10 penalty
+   Missing → No penalty
+
+Detection:
+  model_id_numbers = numbers within model identifiers
+  descriptive_numbers = other numbers in text
+
+Example:
+  Query: "Kiprun KD900X Size 9"
+  - "900" is in KD900X → Model ID number (mandatory)
+  - "9" is size → Descriptive number (soft match)
+  
+  Product: "Kiprun KD900X Size 10"
+  - Has KD900X? ✓ (900 matches)
+  - Size differs (9 vs 10)? -10 penalty
+  - Final: Base score - 10
+
+KEY RULES
+---------
+
+1. ✅ Model identifiers are MANDATORY
+   - Detect patterns: KD900X, MT500, NH100, etc.
+   - All model IDs must be present
+   - Missing ANY → score 0
+   - No exceptions
+
+2. ✅ Brand similarity NEVER compensates
+   - "Kiprun KD900X" cannot match "Kiprun Rain Cap"
+   - Even though brand matches
+
+3. ✅ Query-relative overlap
+   - Extra product tokens don't hurt
+   - "Ball Training Red" has extra words but still matches "Ball"
+   - Realistic for verbose catalogs
+
+4. ✅ Numeric flexibility (descriptive only)
+   - Size 5 query can match Size 4 (with penalty)
+   - Better than "not found"
+   - Model ID numbers still strict
+
+5. ✅ Partial results, not exceptions
+   - Return what was found
+   - Report what was missing
+   - Frontend shows helpful message
+
+6. ✅ Version matching
+   - "KD500 2" must match version 2
+   - Don't silently substitute KD500 3
+   - Return "not found" if version doesn't exist
+
+BENEFITS
+--------
+
+✓ Deterministic entity resolution (no hallucinations)
+✓ Tolerant to catalog variations (extra descriptors)
+✓ Graceful numeric mismatches (size differences)
+✓ Mandatory model IDs (correct product identity)
+✓ Partial results (better UX)
+✓ Query-centric (user's terms matter most)
+✓ Predictable scoring (clear degradation)
+
+LOGGING
+-------
+
+The tool logs extensively for debugging:
+
+1. Product mention parsing
+   - Original: "Football Ball Size 5 First Kick"
+   - Normalized: "football ball size 5 first kick"
+   - Tokens: {football, ball, size, 5, first, kick}
+   - Model IDs: None
+   - Descriptive numbers: {5}
+
+2. Candidate fetching
+   - Fetched 150 candidates
+
+3. Scoring results
+   Top 5 matches:
+     1. Football Ball Size 5 First Kick Blue (score: 90/100)
+     2. Football Ball Size 4 First Kick Training (score: 60/100)
+     3. Football Ball First Kick Red (score: 50/100)
+     4. Football Training Ball (score: 40/100)
+     5. Football Size 3 Youth Ball (score: 30/100)
+
+4. Final selection
+   ✓ Selected: Football Ball Size 5 First Kick Blue
+   Match score: 90/100
+
+5. Resolution summary
+   Successfully resolved: 2 products
+   Failed to resolve: 0 products
+
+TESTING CHECKLIST
+-----------------
+
+Test Case 1: Perfect Match
+Query: "Compare Kiprun KD900X and Football Club Hybrid Ball"
+Expected: Both products found with high scores
+
+Test Case 2: Size Mismatch (Graceful)
+Query: "Compare Size 5 Football Ball First Kick"
+Expected: Matches Size 4 variant if Size 5 doesn't exist (score ~60)
+
+Test Case 3: Model ID Mandatory
+Query: "Compare Kiprun KD900X and Kiprun"
+Expected: KD900X found, "Kiprun" alone fails (too generic)
+
+Test Case 4: Partial Results
+Query: "Compare Real Product and Fake Product Name XYZ123"
+Expected: 
+  products: [Real Product]
+  missing_products: ["Fake Product Name XYZ123"]
+  message: "1 of 2 products could not be resolved..."
+
+Test Case 5: Version Matching
+Query: "Compare KD500 2 and KD500 3"
+Expected: Two different products (if both exist)
+
+Test Case 6: Extra Descriptive Words
+Query: "Compare Football Ball Size 5"
+Expected: Matches "Football Ball Training Size 5 First Kick Red" (extra words OK)
+
+Test Case 7: Numeric Mismatch Multiple
+Query: "Compare Size 5 Age 10 Ball"
+Product: "Size 4 Age 8-12 Ball Training"
+Expected: Score reduced for both numeric mismatches but still match
+
+RESTART
+-------
+
+✅ API server restarted: api_swagger.py (PID: 3)
+✅ Model server unchanged: local_model_server.py (still running)
+✅ Changes loaded and active
+
+Port: 5000
+Endpoints: http://127.0.0.1:5000
+
+NEXT STEPS
+----------
+
+1. ✅ Implementation complete
+2. ✅ API server restarted
+3. ⏳ Test with real queries
+4. ⏳ Monitor logs for edge cases
+5. ⏳ Adjust threshold (currently 40) if needed
+6. ⏳ Frontend integration for partial results
+7. ⏳ User feedback on matching quality
+
+KNOWN LIMITATIONS
+-----------------
+
+1. Token-based matching only
+   - No semantic understanding
+   - "Shoes" won't match "Footwear"
+   - Requires similar terminology
+
+2. Single language (English assumed)
+   - No multi-language support
+   - Product names must be in same language as query
+
+3. Threshold fixed at 40
+   - May need tuning based on usage
+   - Could be made configurable
+
+4. No fuzzy string matching
+   - "Kiprun" won't match "Kprun" (typo)
+   - Relies on correct spelling
+
+5. Limited number extraction
+   - "10-12 years" might not parse correctly
+   - "Size 5.5" might not match "Size 5 1/2"
+
+FILES MODIFIED
+--------------
+
+1. backend/tools/compare_tool.py
+   - Updated _score_token_match() with query-relative scoring
+   - Numeric mismatch penalty instead of discard
+   - Model ID mandatory enforcement
+   - Partial results support
+
+2. backend/models/schemas.py
+   - Updated CompareResponse with missing_products field
+   - Added optional message field
+
+3. COMPARE_QUERY_RELATIVE_SCORING.txt
+   - Documentation of scoring algorithm
+   - Examples and edge cases
+   - Rationale for design decisions
+
+SUMMARY
+-------
+
+The comparison tool now uses deterministic, query-relative token matching that:
+- Requires exact model identifiers when present
+- Tolerates extra descriptive words in product names
+- Applies soft penalties for numeric mismatches
+- Returns partial results instead of throwing exceptions
+- Provides clear scoring hierarchy (100 → 40 minimum)
+
+✅ Ready for testing with real user queries.
+✅ API server restarted and active.
+✅ All changes loaded and operational.
+
+Test it out! 🚀

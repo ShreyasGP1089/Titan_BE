@@ -1,0 +1,260 @@
+BUDGET OPTIMIZER VERIFICATION & DEBUGGING CHANGES
+==================================================
+
+DATE: 2026-06-26
+ISSUE: Optimizer not affecting product selection, still selecting cheapest products
+
+CHANGES MADE
+------------
+
+1. ADDED TIE-BREAKER LOGIC
+   Location: _find_best_combination() method
+   
+   Problem: When multiple combinations have the same total score, 
+            the first one found was kept (often the cheapest)
+   
+   Solution: Added tie-breaker logic that prefers higher total cost
+             when scores are equal
+   
+   Before:
+   ```python
+   if result_score > best_score:
+       best_score = result_score
+       best_result = result
+   ```
+   
+   After:
+   ```python
+   # Update best if: higher score, OR same score but higher cost (tie-breaker)
+   if result_score > best_score or (result_score == best_score and result_cost > best_cost):
+       best_score = result_score
+       best_cost = result_cost
+       best_result = result
+   ```
+   
+   This ensures that when products have similar quality scores, 
+   we use more of the available budget rather than defaulting to
+   the cheapest option.
+
+2. ADDED COMPREHENSIVE LOGGING TO _optimize_selection()
+   
+   Added logs for:
+   - Entry/exit markers
+   - Budget and item counts
+   - Mandatory vs optional item breakdown
+   - Minimum mandatory cost calculation
+   - All candidates available for each item
+   - Start of recursive search
+   - Final best combination found
+   - Budget utilization percentage
+   
+   Example output:
+   ```
+   >>> ENTERING _optimize_selection()
+      Budget: ₹10000.00
+      Items to optimize: 3
+      Mandatory items: 1
+      Optional items: 2
+      Minimum mandatory cost: ₹450.00
+   
+   CANDIDATES AVAILABLE FOR OPTIMIZATION:
+   
+   Bicycle Helmet (Mandatory):
+     1. prod_123 | Premium Helmet | ₹1500.00 | score=0.920
+     2. prod_124 | Pro Helmet | ₹1200.00 | score=0.895
+     3. prod_125 | Standard Helmet | ₹800.00 | score=0.850
+     ...
+   
+   🏆 BEST COMBINATION FOUND:
+      Bicycle Helmet: prod_124 | Pro Helmet | ₹1200.00
+      Cycling Gloves: prod_456 | Pro Gloves | ₹600.00
+      Water Bottle: prod_789 | Insulated Bottle | ₹400.00
+      Total Cost: ₹2200.00
+      Total Score: 2.450
+      Budget Utilization: 22.0%
+   ```
+
+3. ADDED COMBINATION LOGGING TO _find_best_combination()
+   
+   Added logs for:
+   - Each complete valid combination found
+   - Product IDs in combination
+   - Total cost of combination
+   - Total score of combination
+   
+   Example output:
+   ```
+   Exploring combinations (showing complete valid combinations):
+      Combination: Helmet: prod_123, Gloves: prod_456 | Cost=₹2100.00 | Score=2.420
+      Combination: Helmet: prod_123, Gloves: prod_457 | Cost=₹1800.00 | Score=2.380
+      Combination: Helmet: prod_124, Gloves: prod_456 | Cost=₹1800.00 | Score=2.395
+      ...
+   ```
+
+4. ADDED SELECTION APPLICATION LOGGING
+   
+   Added logs for:
+   - Application of optimized selection to items
+   - Product ID, name, and price for each selection
+   - Verification that recommended field is set
+   
+   Example output:
+   ```
+   APPLYING OPTIMIZED SELECTION TO ITEMS:
+   ✓ Bicycle Helmet: prod_124 | Pro Helmet | ₹1200.00 | score=0.895
+   ✓ Cycling Gloves: prod_456 | Pro Gloves | ₹600.00 | score=0.850
+   ✓ Water Bottle: prod_789 | Insulated Bottle | ₹400.00 | score=0.755
+   
+   BUILDING RESPONSE WITH OPTIMIZED SELECTIONS:
+     Bicycle Helmet: Set recommended to prod_124 (₹1200.00)
+     Cycling Gloves: Set recommended to prod_456 (₹600.00)
+     Water Bottle: Set recommended to prod_789 (₹400.00)
+   ```
+
+VERIFICATION SCRIPT
+-------------------
+
+Created: test_optimizer_verification.py
+
+This script:
+1. Runs a cycling task with ₹10,000 budget
+2. Displays detailed logs from the optimizer
+3. Shows the final selected products
+4. Provides a verification checklist
+
+Run: python3 test_optimizer_verification.py
+
+WHAT TO LOOK FOR IN LOGS
+-------------------------
+
+✓ ">>> ENTERING _optimize_selection()"
+  → Confirms optimizer is being invoked
+
+✓ "CANDIDATES AVAILABLE FOR OPTIMIZATION:"
+  → Shows all products being considered
+  → Verify there are products at different price points
+
+✓ "Exploring combinations..."
+  → Confirms search is running
+
+✓ "Combination: ... | Cost=₹... | Score=..."
+  → Shows each valid combination being evaluated
+  → Verify multiple combinations with different costs
+
+✓ "🏆 BEST COMBINATION FOUND:"
+  → Shows the winning combination
+  → Verify it's not always the cheapest option
+  → Check budget utilization percentage
+
+✓ "APPLYING OPTIMIZED SELECTION TO ITEMS:"
+  → Confirms selected products from optimization
+
+✓ "Set recommended to [product_id]"
+  → Confirms each item's recommended field is updated
+  → Verify product IDs match the best combination
+
+DEBUGGING CHECKLIST
+-------------------
+
+If optimizer still selecting cheapest products:
+
+1. Check if _optimize_selection() is being called
+   → Search logs for ">>> ENTERING _optimize_selection()"
+   → If not found: optimizer not being invoked
+
+2. Check candidate products
+   → Search logs for "CANDIDATES AVAILABLE FOR OPTIMIZATION"
+   → Verify there are 5 candidates per item
+   → Verify candidates have different prices
+   → If all candidates are same price: search/ranking issue
+
+3. Check combinations explored
+   → Search logs for "Combination:"
+   → Count how many combinations are logged
+   → Verify combinations have different costs
+   → If only one combination: search space too limited
+
+4. Check best combination
+   → Search logs for "🏆 BEST COMBINATION FOUND"
+   → Check total cost and score
+   → If cost is minimum: tie-breaker not working
+
+5. Check application to response
+   → Search logs for "Set recommended to"
+   → Verify product IDs match best combination
+   → If they don't match: application logic broken
+
+6. Check product scores
+   → In "CANDIDATES AVAILABLE FOR OPTIMIZATION" logs
+   → Verify scores vary (not all the same)
+   → If all scores equal: scoring formula issue
+   → Check: search score, validation score, profile score
+
+EXPECTED BEHAVIOR
+-----------------
+
+Cycling Task, ₹10,000 Budget:
+
+BEFORE FIX:
+- Selected: Cheapest helmet + cheapest gloves + cheapest bottle
+- Total: ~₹1,897
+- Remaining: ~₹8,103
+- Budget utilization: ~19%
+
+AFTER FIX:
+- Selected: Optimized combination balancing quality and cost
+- Total: ₹2,000 - ₹7,000
+- Remaining: ₹3,000 - ₹8,000
+- Budget utilization: 20% - 70%
+
+Note: For cycling, helmet is mandatory, gloves and bottle are optional.
+With ₹10,000 budget, optimizer should include at least helmet + one optional
+item unless product scores are extremely low.
+
+TIE-BREAKER EXPLANATION
+-----------------------
+
+When two combinations have the same total recommendation score,
+we prefer the one with higher total cost (within budget).
+
+Rationale:
+- User specified a budget they're willing to spend
+- If two combinations are equally good quality-wise,
+  spending more gives better value for money
+- Prevents defaulting to cheapest when quality is equal
+
+Example:
+  Combination A: Helmet(₹800, score=0.85) + Gloves(₹300, score=0.75)
+                 Total: ₹1100, Score: 1.60
+  
+  Combination B: Helmet(₹1200, score=0.88) + Gloves(₹400, score=0.72)
+                 Total: ₹1600, Score: 1.60
+  
+  Without tie-breaker: Combination A wins (found first)
+  With tie-breaker: Combination B wins (higher cost, same score)
+
+RESTART REQUIRED
+----------------
+
+After making these changes, you need to restart api_swagger.py
+
+Restart command:
+  1. Stop the current api_swagger.py process (Ctrl+C)
+  2. Start it again: python3 backend/api_swagger.py
+
+You do NOT need to restart local_model_server.py
+
+NEXT STEPS
+----------
+
+1. Restart api_swagger.py
+2. Run: python3 test_optimizer_verification.py
+3. Review logs for the checklist items above
+4. If optimizer is running but still selecting cheapest:
+   - Check product scores in logs
+   - Verify scoring formula is working
+   - Check if all products have similar scores
+5. If optimizer is not running:
+   - Check for Python syntax errors
+   - Check import statements
+   - Verify budget_optimizer.py was saved correctly

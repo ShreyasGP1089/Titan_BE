@@ -1,0 +1,447 @@
+================================================================================
+FALLBACK MECHANISMS - Complete Overview
+================================================================================
+
+The system has multiple fallback layers to handle failures gracefully.
+
+================================================================================
+1. PARSER FALLBACK (Query Parsing)
+================================================================================
+
+LOCATION: backend/hf_planner.py
+
+FAILURE SCENARIO:
+- Local model server is offline (connection error)
+- Model returns invalid JSON
+- Parsing timeout
+
+FALLBACK BEHAVIOR:
+```python
+parsed_query = parse_query_with_local_model(user_query)
+
+if not parsed_query:
+    return {
+        'status': 'error',
+        'error': 'Failed to parse query',
+        'user_query': user_query
+    }
+```
+
+RESULT:
+❌ Request fails with error message
+❌ NO automatic fallback to simpler parsing
+⚠️  User must retry or rephrase query
+
+RECOMMENDATION:
+Consider adding a simple rule-based parser fallback:
+- Extract price from regex patterns
+- Basic keyword tokenization
+- Default sport=null, category=null
+
+================================================================================
+2. KEYWORD SEARCH FALLBACK (No Candidates)
+================================================================================
+
+LOCATION: backend/search_pipeline.py (hybrid_search function)
+
+FAILURE SCENARIO:
+- No products match keyword + sport + category combination
+- Example: User searches "golf shoes" but database has no golf shoes
+
+FALLBACK BEHAVIOR:
+```python
+# Step 1: Keyword search (specific)
+candidates = keyword_search(
+    sport=sport,
+    category=category,
+    keywords=keywords,
+    price_limit=price_limit,
+    limit=100
+)
+
+# Step 2: Fallback if no candidates
+if not candidates:
+    logger.warning("No candidates found, falling back to sport-wide semantic search")
+    # Drop category and keywords, keep only sport
+    candidates = keyword_search(
+        sport=sport,
+        price_limit=price_limit,
+        limit=100
+    )
+
+# Step 3: Final check
+if not candidates:
+    logger.warning(f"No products found for sport={sport}")
+    return []
+```
+
+FALLBACK CHAIN:
+1. Try: sport + category + keywords
+2. Fallback: sport only (broader search)
+3. Final: Return empty list
+
+RESULT:
+✅ Finds related products in same sport
+✅ User sees something instead of empty results
+⚠️  May return products that don't match original intent
+
+EXAMPLE:
+Query: "golf gloves" (but no golf gloves in database)
+1. Search: sport=Golf + category=Accessories + keywords=["glove"] → 0 results
+2. Fallback: sport=Golf only → Returns golf balls, clubs, bags, etc.
+3. User sees golf products (not ideal, but better than empty)
+
+================================================================================
+3. VALIDATOR FALLBACK (SLM Offline)
+================================================================================
+
+LOCATION: backend/services/hybrid_search.py
+
+FAILURE SCENARIO:
+- Local model server is offline
+- Validation endpoint returns error
+- Request timeout
+
+FALLBACK BEHAVIOR:
+```python
+validation_decisions = self.validation_service.validate_products(
+    product_type, ranked_products
+)
+
+# Safe Fallback: if validator is offline, only return products that
+# have keyword_score > 0 (i.e. they actually contain the product type keyword).
+if validation_decisions is None:
+    logger.warning("⚠️  LLM VALIDATOR OFFLINE - Applying keyword-based fallback")
+    
+    keyword_matched = [
+        p for p in ranked_products 
+        if p.get('keyword_score', 0) > 0
+    ]
+    
+    if keyword_matched:
+        logger.info(f"✅ Keyword fallback: {len(keyword_matched)} products matched")
+        return keyword_matched[:top_k]
+    else:
+        logger.error(f"❌ No products matched keyword. Returning empty.")
+        return []
+```
+
+KEYWORD SCORE:
+- Products get keyword_score based on SQL LIKE matching
+- If product name/description contains the search keyword → keyword_score > 0
+- If no keyword match → keyword_score = 0
+
+RESULT:
+✅ Returns products with keyword matches (no RELEVANT/RELATED classification)
+✅ System remains functional even if SLM is offline
+⚠️  Classification quality is lower (keyword matching only)
+⚠️  No distinction between RELEVANT and RELATED products
+
+EXAMPLE:
+Query: "golf club"
+SLM Offline → Fallback:
+- Returns products where name LIKE '%golf%' AND name LIKE '%club%'
+- Includes: golf clubs, golf club sets, golf club bags (all mixed together)
+- Missing: Proper RELEVANT vs RELATED classification
+
+================================================================================
+4. SEMANTIC RANKING FALLBACK (Embedding Error)
+================================================================================
+
+LOCATION: backend/search_pipeline.py (semantic_ranking function)
+
+FAILURE SCENARIO:
+- Embedding model fails
+- Semantic search error
+
+FALLBACK BEHAVIOR:
+```python
+try:
+    # Semantic ranking logic
+    ...
+except Exception as e:
+    logger.error(f"Semantic ranking error: {e}")
+    # Fallback: return top-k from candidates based on rating
+    sorted_candidates = sorted(
+        candidate_products,
+        key=lambda x: (x.get('rating') or 0, x.get('review_count') or 0),
+        reverse=True
+    )
+    return sorted_candidates[:top_k]
+```
+
+RESULT:
+✅ Returns products sorted by rating (popularity)
+⚠️  Loses semantic similarity ranking
+⚠️  Products may not match query intent well
+
+================================================================================
+5. COMPARISON FALLBACK (Missing Products)
+================================================================================
+
+LOCATION: backend/tools/compare_tool.py
+
+FAILURE SCENARIO:
+- One or more products cannot be resolved
+- Example: Compare "iPhone 14" vs "Samsung Galaxy" but database has no Samsung phones
+
+FALLBACK BEHAVIOR:
+```python
+resolved_products = []
+missing_products = []
+
+for product_ref in product_refs:
+    try:
+        resolved_p = self._resolve_product(ref)
+        resolved_products.append(resolved_p)
+    except ValueError as e:
+        logger.warning(f"✗ Could not resolve: {str(e)}")
+        missing_products.append(ref)
+
+# Return partial results
+if missing_products:
+    if len(missing_products) == len(product_refs):
+        message = "None of the requested products could be found."
+    else:
+        message = f"{len(missing_products)} of {len(product_refs)} products could not be resolved."
+
+return CompareResponse(
+    products=resolved_products,
+    missing_products=missing_products,
+    message=message
+)
+```
+
+RESULT:
+✅ Returns partial comparison (whatever was found)
+✅ Lists missing products explicitly
+✅ User knows which products weren't found
+
+================================================================================
+6. ALTERNATIVES FALLBACK (SLM Offline)
+================================================================================
+
+LOCATION: backend/tools/alternatives_tool.py
+
+FAILURE SCENARIO:
+- SLM alternative generation endpoint is offline
+- Cannot generate search criteria dynamically
+
+FALLBACK BEHAVIOR:
+```python
+# Try to get search criteria from SLM
+slm_result = self.validation_service.generate_alternative_search(
+    source_product, user_query
+)
+
+if slm_result is None:
+    # Fallback: Use source product metadata directly
+    logger.warning("⚠️ SLM alternative generation failed. Using metadata fallback.")
+    
+    search_criteria = {
+        "sport": source_product.get("sport"),
+        "category_level_1": source_product.get("category_level_1"),
+        "keywords": [source_product.get("name")],
+        "constraints": {}
+    }
+```
+
+ADDITIONAL FALLBACK (Cheaper Alternatives):
+```python
+# POST-RETRIEVAL CHEAPER ALTERNATIVES FILTER
+# Works even when SLM is offline (uses query text matching)
+if candidates and user_query:
+    query_lower = user_query.lower()
+    cheaper_keywords = ['cheap', 'lower price', 'budget', 'affordable']
+    is_cheaper_intent = any(keyword in query_lower for keyword in cheaper_keywords)
+    
+    if is_cheaper_intent:
+        source_price = float(source_product.get("price") or 0.0)
+        candidates = [
+            c for c in candidates
+            if float(c.get("price") or 0.0) <= source_price
+        ]
+```
+
+RESULT:
+✅ Uses product metadata for search (sport, category)
+✅ Cheaper alternatives filter works offline (keyword detection)
+⚠️  Less intelligent than SLM-generated criteria
+
+================================================================================
+7. RECOMMENDATION FALLBACK (Generation Error)
+================================================================================
+
+LOCATION: backend/hf_planner.py
+
+FAILURE SCENARIO:
+- Recommendation generation fails
+- Model returns invalid output
+
+FALLBACK BEHAVIOR:
+```python
+try:
+    response = client.generate(prompt, max_new_tokens=512)
+    return response
+except Exception as e:
+    logger.error(f"Recommendation generation error: {e}")
+    # Fallback: Simple recommendation
+    if search_results.get('products'):
+        top_product = search_results['products'][0]
+        return (
+            f"I found some great options for you! "
+            f"I'd recommend the {top_product['name']} "
+            f"by {top_product.get('brand', 'Decathlon')} "
+            f"priced at ₹{top_product['price']}."
+        )
+    return "I couldn't find any products matching your criteria."
+```
+
+RESULT:
+✅ Returns simple template-based recommendation
+✅ User gets some response instead of error
+⚠️  Generic, not personalized
+
+================================================================================
+FALLBACK HIERARCHY SUMMARY
+================================================================================
+
+LEVEL 1: PARSER
+- Fails → Request error (NO FALLBACK)
+
+LEVEL 2: KEYWORD SEARCH
+- No results → Broaden to sport-wide search
+- Still no results → Return empty
+
+LEVEL 3: SEMANTIC RANKING
+- Fails → Sort by rating/popularity
+
+LEVEL 4: VALIDATOR (SLM)
+- Offline → Keyword-based filtering
+- Returns products with keyword_score > 0
+
+LEVEL 5: COMPARISON
+- Missing products → Return partial results + list missing
+
+LEVEL 6: ALTERNATIVES
+- SLM offline → Use metadata fallback
+- Cheaper filter works offline (text matching)
+
+LEVEL 7: RECOMMENDATIONS
+- Fails → Template-based recommendation
+
+================================================================================
+CRITICAL GAPS
+================================================================================
+
+1. PARSER HAS NO FALLBACK
+   - If SLM is offline, entire request fails
+   - Should add simple rule-based parser
+
+2. VALIDATOR FALLBACK IS KEYWORD-ONLY
+   - Returns all products with keyword matches
+   - No distinction between RELEVANT and RELATED
+   - May return too many results
+
+3. NO RETRY LOGIC
+   - If SLM is temporarily unavailable, request fails immediately
+   - Should implement retry with exponential backoff
+
+================================================================================
+RECOMMENDED IMPROVEMENTS
+================================================================================
+
+1. Add Simple Parser Fallback
+```python
+def simple_parse_fallback(query: str) -> Dict:
+    """Rule-based parser when SLM is offline"""
+    # Extract price with regex
+    price_match = re.search(r'(?:under|below|less than)\s*(?:rs\.?|₹)?\s*(\d+)', query.lower())
+    price_limit = int(price_match.group(1)) if price_match else None
+    
+    # Tokenize keywords
+    keywords = [w for w in query.lower().split() if len(w) > 3]
+    
+    return {
+        "intent": "search",
+        "search_request": {
+            "sport": None,
+            "category_level_1": None,
+            "keywords": keywords,
+            "price_limit": price_limit
+        }
+    }
+```
+
+2. Add Validator Retry Logic
+```python
+def validate_products_with_retry(product_type, candidates, retries=2):
+    for attempt in range(retries):
+        try:
+            result = validation_service.validate_products(product_type, candidates)
+            if result:
+                return result
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)  # Exponential backoff
+    return None  # Fall back to keyword matching
+```
+
+3. Improve Keyword Fallback
+```python
+# Instead of returning all keyword matches
+# Apply simple heuristics:
+def smart_keyword_fallback(products, product_type):
+    # Prefer products with product_type in name (not just description)
+    name_matches = [p for p in products if product_type.lower() in p['name'].lower()]
+    if name_matches:
+        return name_matches[:top_k]
+    
+    # Fallback to all keyword matches
+    return products[:top_k]
+```
+
+================================================================================
+TESTING FALLBACKS
+================================================================================
+
+To test fallback behavior:
+
+1. PARSER FALLBACK:
+   - Stop local_model_server.py
+   - Send search request
+   - Observe: Request fails with "Failed to parse query"
+
+2. VALIDATOR FALLBACK:
+   - Stop local_model_server.py AFTER parser succeeds
+   - OR comment out validator call in hybrid_search.py
+   - Observe: "LLM VALIDATOR OFFLINE - Applying keyword-based fallback"
+
+3. KEYWORD SEARCH FALLBACK:
+   - Search for non-existent product: "quantum football"
+   - Observe: Falls back to sport-wide search
+
+4. SEMANTIC RANKING FALLBACK:
+   - Break embedding model
+   - Observe: Products sorted by rating instead
+
+================================================================================
+SUMMARY
+================================================================================
+
+ROBUST FALLBACKS:
+✅ Keyword search (broadens to sport-wide)
+✅ Validator (keyword-based filtering)
+✅ Comparison (partial results)
+✅ Alternatives (metadata-based)
+✅ Recommendations (template-based)
+
+MISSING FALLBACKS:
+❌ Parser (no fallback, request fails)
+
+IMPROVEMENT OPPORTUNITIES:
+⚠️  Add simple rule-based parser fallback
+⚠️  Implement retry logic for transient SLM failures
+⚠️  Improve keyword fallback with smarter heuristics
+
+The system is generally resilient, but the parser is a single point of failure!

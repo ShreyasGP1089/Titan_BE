@@ -4,6 +4,7 @@ Executes task intent requests (activity-based shopping)
 """
 import logging
 import re
+import time
 from typing import List, Dict, Optional
 from models.schemas import TaskArguments, TaskResponse, TaskItem, Product
 from services.hybrid_search import HybridSearchService
@@ -236,11 +237,17 @@ class TaskTool:
         Returns:
             TaskResponse with items and products
         """
+        # ================================================================
+        # PERFORMANCE PROFILING START
+        # ================================================================
+        t_task_start = time.time()
+        t_parsing_start = time.time()
+        
         activity = arguments.activity
         budget = arguments.budget
         
         logger.info("=" * 80)
-        logger.info(f"TASKTOOL EXECUTION START")
+        logger.info(f"TASK PERFORMANCE PROFILE")
         logger.info(f"Activity: {activity}, Budget: {budget}")
         logger.info("=" * 80)
         
@@ -254,6 +261,23 @@ class TaskTool:
         # Infer user profile once for the entire task
         user_profile = infer_user_profile(arguments.query or "")
         
+        t_parsing_end = time.time()
+        t_parsing_duration = (t_parsing_end - t_parsing_start) * 1000
+        
+        logger.info(f"Task Parsing")
+        logger.info(f"  Start: {t_parsing_start:.3f}")
+        logger.info(f"  End: {t_parsing_end:.3f}")
+        logger.info(f"  Duration: {t_parsing_duration:.1f} ms")
+        logger.info("-" * 80)
+        
+        # Performance tracking
+        perf_items = []
+        total_search_time = 0
+        total_validation_time = 0
+        total_products_retrieved = 0
+        total_products_validated = 0
+        total_products_rejected = 0
+        
         # Search products for each item
         items = []
         all_products = {}
@@ -261,6 +285,7 @@ class TaskTool:
         logger.info(f"Searching for {len(task_definition)} items:")
         for idx, item_def in enumerate(task_definition, 1):
             logger.info(f"  {idx}. {item_def['name']}")
+        logger.info("")
         
         for item_index, item_def in enumerate(task_definition, 1):
             item_name = item_def["name"]
@@ -273,25 +298,33 @@ class TaskTool:
             
             logger.info("-" * 80)
             logger.info(f"ITEM {item_index}/{len(task_definition)}: {item_name}")
-            logger.info(f"  Mandatory: {mandatory}")
-            logger.info(f"  Keywords: {keywords}")
-            logger.info(f"  Validation: {validation_keywords}")
-            logger.info(f"  Negative: {negative_keywords}")
             logger.info("-" * 80)
             
-            # Search products — get top 20 for a richer candidate pool
-            # Profile scoring needs enough candidates to re-rank (e.g., kids products
-            # often rank lower in generic search but should surface for kids queries)
+            t_item_search_start = time.time()
+            
+            # Search products
             products = self.search_service.search(
                 sport=sport,
                 category_level_1=category,
                 keywords=keywords,
-                price_limit=budget,  # Pre-filter by budget if set
+                price_limit=budget,
                 top_k=20,
-                return_format='flat'  # Backward compatibility: get flat list of RELEVANT products only
+                return_format='flat'
             )
             
-            # Validate products - filter out mismatches
+            t_item_search_end = time.time()
+            t_item_search_duration = (t_item_search_end - t_item_search_start) * 1000
+            total_search_time += t_item_search_duration
+            
+            candidates_retrieved = len(products)
+            total_products_retrieved += candidates_retrieved
+            
+            logger.info(f"Search Duration: {t_item_search_duration:.1f} ms")
+            logger.info(f"Candidates Retrieved: {candidates_retrieved}")
+            
+            # Validation
+            t_item_validation_start = time.time()
+            
             validated_products = []
             rejected_products = []
             
@@ -302,12 +335,24 @@ class TaskTool:
                     validated_products.append(product)
                 else:
                     rejected_products.append(product)
-                    logger.warning(f"  ❌ REJECTED: {product['name']} (doesn't match {validation_keywords})")
+            
+            t_item_validation_end = time.time()
+            t_item_validation_duration = (t_item_validation_end - t_item_validation_start) * 1000
+            total_validation_time += t_item_validation_duration
+            
+            candidates_validated = len(validated_products)
+            candidates_rejected = len(rejected_products)
+            total_products_validated += candidates_validated
+            total_products_rejected += candidates_rejected
+            
+            logger.info(f"Validation Duration: {t_item_validation_duration:.1f} ms")
+            logger.info(f"Candidates Validated: {candidates_validated}")
+            logger.info(f"Candidates Rejected: {candidates_rejected}")
             
             if rejected_products:
-                logger.info(f"  ✓ Validated: {len(validated_products)}/{len(products)} products")
+                logger.info(f"Validation Success Rate: {candidates_validated}/{candidates_retrieved} ({candidates_validated/candidates_retrieved*100:.1f}%)")
             
-            # Convert to Product objects (all validated, up to 20 for discovery/ranking)
+            # Convert to Product objects
             product_objects = []
             for p in validated_products:
                 p_dict = dict(p)
@@ -331,19 +376,36 @@ class TaskTool:
             )
             items.append(task_item)
             
-            logger.info(f"✓ Item '{item_name}' search complete")
+            # Track item performance
+            perf_items.append({
+                "name": item_name,
+                "search_ms": t_item_search_duration,
+                "validation_ms": t_item_validation_duration,
+                "retrieved": candidates_retrieved,
+                "validated": candidates_validated,
+                "rejected": candidates_rejected
+            })
+            
+            logger.info(f"✓ Item '{item_name}' complete")
+            logger.info("")
         
         logger.info("=" * 80)
         logger.info("ALL ITEM SEARCHES COMPLETE")
         logger.info("=" * 80)
+        logger.info("")
         
-        # If budget exists, optimize
+        # Budget optimization
+        t_budget_start = time.time()
+        
         total_cost = None
         within_budget = None
         budget_remaining = None
 
         if budget:
-            logger.info(f"Optimizing budget: ₹{budget}")
+            logger.info(f"Budget Optimization")
+            logger.info(f"  Start: {t_budget_start:.3f}")
+            logger.info(f"  Budget: ₹{budget}")
+            
             optimized = self.budget_optimizer.optimize(
                 items=items,
                 budget=budget,
@@ -352,19 +414,30 @@ class TaskTool:
 
             if not optimized.get("success", True):
                 logger.error(f"Budget optimization failed: {optimized.get('message')}")
-                # Still return items in discovery mode even if budget fails
             
             items            = optimized["items"]
             total_cost       = optimized.get("total_cost")
             within_budget    = optimized.get("within_budget")
             budget_remaining = optimized.get("budget_remaining")
         else:
-            # No budget — rank products and set recommended for each item
+            logger.info(f"No Budget - Discovery Mode")
+            logger.info(f"  Start: {t_budget_start:.3f}")
+            
             items = self.budget_optimizer.discover(items, user_profile=user_profile)
             total_cost = sum(
                 item.budget_allocated for item in items
                 if item.budget_allocated and item.recommended
             )
+        
+        t_budget_end = time.time()
+        t_budget_duration = (t_budget_end - t_budget_start) * 1000
+        
+        logger.info(f"  End: {t_budget_end:.3f}")
+        logger.info(f"  Duration: {t_budget_duration:.1f} ms")
+        logger.info("")
+        
+        # Response formatting
+        t_formatting_start = time.time()
         
         response = TaskResponse(
             activity=activity,
@@ -376,9 +449,46 @@ class TaskTool:
             query=arguments.query,
         )
         
+        t_formatting_end = time.time()
+        t_formatting_duration = (t_formatting_end - t_formatting_start) * 1000
+        
+        t_task_end = time.time()
+        t_task_total = (t_task_end - t_task_start) * 1000
+        
+        # ================================================================
+        # PERFORMANCE SUMMARY
+        # ================================================================
         logger.info("=" * 80)
-        logger.info(f"TASKTOOL EXECUTION COMPLETE")
-        logger.info(f"Returned {len(items)} items")
+        logger.info("PERFORMANCE SUMMARY")
+        logger.info("=" * 80)
+        logger.info(f"Task Parsing: {t_parsing_duration:.1f} ms")
+        logger.info(f"Retrieval: {total_search_time:.1f} ms ({total_search_time/t_task_total*100:.1f}%)")
+        logger.info(f"Validation: {total_validation_time:.1f} ms ({total_validation_time/t_task_total*100:.1f}%)")
+        logger.info(f"Budget Optimization: {t_budget_duration:.1f} ms ({t_budget_duration/t_task_total*100:.1f}%)")
+        logger.info(f"Response Formatting: {t_formatting_duration:.1f} ms")
+        logger.info("-" * 80)
+        logger.info(f"TOTAL TASK TIME: {t_task_total:.1f} ms")
+        logger.info("=" * 80)
+        logger.info("")
+        logger.info("SEARCH STATISTICS")
+        logger.info("=" * 80)
+        logger.info(f"Total Products Retrieved: {total_products_retrieved}")
+        logger.info(f"Total Products Validated: {total_products_validated}")
+        logger.info(f"Total Products Rejected: {total_products_rejected}")
+        logger.info(f"Overall Validation Rate: {total_products_validated}/{total_products_retrieved} ({total_products_validated/total_products_retrieved*100:.1f}%)")
+        logger.info("=" * 80)
+        logger.info("")
+        logger.info("PER-ITEM BREAKDOWN")
+        logger.info("=" * 80)
+        for item_perf in perf_items:
+            logger.info(f"{item_perf['name']}")
+            logger.info(f"  Search: {item_perf['search_ms']:.1f} ms")
+            logger.info(f"  Validation: {item_perf['validation_ms']:.1f} ms")
+            logger.info(f"  Retrieved: {item_perf['retrieved']}")
+            logger.info(f"  Validated: {item_perf['validated']}")
+            logger.info(f"  Rejected: {item_perf['rejected']}")
+            if item_perf['retrieved'] > 0:
+                logger.info(f"  Success Rate: {item_perf['validated']}/{item_perf['retrieved']} ({item_perf['validated']/item_perf['retrieved']*100:.1f}%)")
         logger.info("=" * 80)
         
         return response
