@@ -249,22 +249,21 @@ def load_model():
         _model = _model.to(device)
         logger.info(f"✓ Model moved to {device.upper()}")
     
-    # Load LoRA adapter (REQUIRED)
+    # Load LoRA adapter (OPTIONAL - will use base model if not available)
     adapter_path = Path(ADAPTER_PATH)
     if not adapter_path.exists():
-        error_msg = f"LoRA adapter not found at {ADAPTER_PATH}"
-        logger.error(f"❌ {error_msg}")
-        logger.error("   Train the adapter first: python3 training/train_hf.py")
-        raise FileNotFoundError(error_msg)
-    
-    logger.info(f"📦 Loading LoRA adapter from {ADAPTER_PATH}...")
-    try:
-        _model = PeftModel.from_pretrained(_model, str(adapter_path))
-        logger.info("✓ LoRA adapter loaded successfully!")
-        logger.info("   Using fine-tuned Qwen2.5-1.5B for better JSON parsing")
-    except Exception as e:
-        logger.error(f"❌ LoRA adapter loading failed: {e}")
-        raise
+        logger.warning(f"⚠️  LoRA adapter not found at {ADAPTER_PATH}")
+        logger.warning("   Using base model without fine-tuning")
+        logger.warning("   For better results, train the adapter: python3 training/train_hf.py")
+    else:
+        logger.info(f"📦 Loading LoRA adapter from {ADAPTER_PATH}...")
+        try:
+            _model = PeftModel.from_pretrained(_model, str(adapter_path))
+            logger.info("✓ LoRA adapter loaded successfully!")
+            logger.info("   Using fine-tuned Qwen2.5-1.5B for better JSON parsing")
+        except Exception as e:
+            logger.error(f"❌ LoRA adapter loading failed: {e}")
+            logger.warning("   Continuing with base model")
     
     _model.eval()  # Set to evaluation mode
     
@@ -699,6 +698,180 @@ async def debug_prompt(request: DebugPromptRequest):
         
     except Exception as e:
         logger.error(f"❌ Debug error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class ComparisonSummaryRequest(BaseModel):
+    """Request model for comparison summary generation."""
+    product_1: dict
+    product_2: dict
+
+
+class ComparisonSummaryResponse(BaseModel):
+    """Response model for comparison summary."""
+    summary: str
+    key_differences: List[str]
+    best_for: dict
+    model: str
+    device: str
+
+
+@app.post("/generate-comparison-summary", response_model=ComparisonSummaryResponse)
+async def generate_comparison_summary(request: ComparisonSummaryRequest):
+    """
+    Generate a comparison summary between two products.
+    
+    Uses the local SLM to generate a natural language comparison
+    based solely on the provided product information.
+    
+    This endpoint is ONLY called by the Compare Tool.
+    """
+    try:
+        model, tokenizer = load_model()
+        device = get_device()
+        
+        logger.info("=" * 80)
+        logger.info("GENERATE COMPARISON SUMMARY")
+        logger.info("=" * 80)
+        logger.info(f"Product 1: {request.product_1.get('name', 'N/A')}")
+        logger.info(f"Product 2: {request.product_2.get('name', 'N/A')}")
+        
+        # Build prompt with structured product information
+        prompt = f"""<|im_start|>system
+You are a product comparison assistant. Compare two products based ONLY on the information provided. Do not use external knowledge or invent specifications.
+
+Output ONLY valid JSON in this exact format:
+{{
+  "summary": "A brief 2-3 sentence comparison highlighting the main differences",
+  "key_differences": ["Difference 1", "Difference 2", "Difference 3"],
+  "best_for": {{
+    "product_1": "Best for users who...",
+    "product_2": "Best for users who..."
+  }}
+}}
+
+If the products serve different purposes (e.g., running shoes vs. football), state they are complementary rather than direct alternatives.<|im_end|>
+<|im_start|>user
+Compare these two products:
+
+Product 1:
+Name: {request.product_1.get('name', 'N/A')}
+Brand: {request.product_1.get('brand', 'N/A')}
+Category: {request.product_1.get('category_level_1', 'N/A')} > {request.product_1.get('category_level_2', 'N/A')}
+Sport: {request.product_1.get('sport', 'N/A')}
+Price: ₹{request.product_1.get('price', 0)}
+Rating: {request.product_1.get('rating', 'N/A')} ({request.product_1.get('review_count', 0)} reviews)
+Description: {request.product_1.get('description', 'No description available')[:200]}
+
+Product 2:
+Name: {request.product_2.get('name', 'N/A')}
+Brand: {request.product_2.get('brand', 'N/A')}
+Category: {request.product_2.get('category_level_1', 'N/A')} > {request.product_2.get('category_level_2', 'N/A')}
+Sport: {request.product_2.get('sport', 'N/A')}
+Price: ₹{request.product_2.get('price', 0)}
+Rating: {request.product_2.get('rating', 'N/A')} ({request.product_2.get('review_count', 0)} reviews)
+Description: {request.product_2.get('description', 'No description available')[:200]}<|im_end|>
+<|im_start|>assistant
+"""
+        
+        logger.info(f"Prompt length: {len(prompt)} characters")
+        
+        # Tokenize
+        inputs = tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=2048
+        ).to(device)
+        
+        logger.info(f"Input tokens: {inputs.input_ids.shape[1]}")
+        
+        # Generate
+        with torch.no_grad():
+            outputs = model.generate(
+                inputs.input_ids,
+                max_new_tokens=512,
+                temperature=0.7,
+                do_sample=True,
+                top_p=0.9,
+                eos_token_id=tokenizer.eos_token_id,
+                pad_token_id=tokenizer.eos_token_id
+            )
+        
+        # Decode
+        generated_ids = outputs[0][inputs.input_ids.shape[1]:].tolist()
+        response_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+        
+        # Extract JSON before <|im_end|>
+        response_text = response_text.split("<|im_end|>")[0].strip()
+        
+        logger.info(f"Raw response:\n{response_text[:500]}...")
+        
+        # Parse JSON
+        try:
+            # Try to extract JSON from response
+            # Sometimes the model adds extra text before/after JSON
+            json_start = response_text.find('{')
+            json_end = response_text.rfind('}') + 1
+            
+            if json_start >= 0 and json_end > json_start:
+                json_str = response_text[json_start:json_end]
+                comparison_data = json.loads(json_str)
+            else:
+                # Fallback if no JSON found
+                raise ValueError("No JSON found in response")
+            
+            # Validate required fields
+            if not isinstance(comparison_data.get('summary'), str):
+                comparison_data['summary'] = "These products have different features and price points."
+            
+            if not isinstance(comparison_data.get('key_differences'), list):
+                comparison_data['key_differences'] = [
+                    f"Product 1: {request.product_1.get('name')}",
+                    f"Product 2: {request.product_2.get('name')}",
+                    f"Price difference: ₹{abs(request.product_1.get('price', 0) - request.product_2.get('price', 0))}"
+                ]
+            
+            if not isinstance(comparison_data.get('best_for'), dict):
+                comparison_data['best_for'] = {
+                    "product_1": request.product_1.get('name', 'First product'),
+                    "product_2": request.product_2.get('name', 'Second product')
+                }
+            
+            logger.info("✓ Successfully parsed comparison JSON")
+            logger.info(f"Summary: {comparison_data['summary'][:100]}...")
+            logger.info(f"Key differences: {len(comparison_data['key_differences'])}")
+            
+            return ComparisonSummaryResponse(
+                summary=comparison_data['summary'],
+                key_differences=comparison_data['key_differences'],
+                best_for=comparison_data['best_for'],
+                model=BASE_MODEL,
+                device=device
+            )
+            
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.warning(f"Failed to parse JSON from model response: {e}")
+            logger.warning(f"Raw response: {response_text[:200]}")
+            
+            # Fallback response
+            return ComparisonSummaryResponse(
+                summary=f"Comparing {request.product_1.get('name')} and {request.product_2.get('name')}.",
+                key_differences=[
+                    f"Product 1: {request.product_1.get('name')} - ₹{request.product_1.get('price')}",
+                    f"Product 2: {request.product_2.get('name')} - ₹{request.product_2.get('price')}",
+                    f"Price difference: ₹{abs(request.product_1.get('price', 0) - request.product_2.get('price', 0))}"
+                ],
+                best_for={
+                    "product_1": f"Users looking for {request.product_1.get('category_level_2', 'this product')}",
+                    "product_2": f"Users looking for {request.product_2.get('category_level_2', 'this product')}"
+                },
+                model=BASE_MODEL,
+                device=device
+            )
+        
+    except Exception as e:
+        logger.error(f"❌ Comparison summary error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

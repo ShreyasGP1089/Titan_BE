@@ -33,14 +33,18 @@ TEST_CASES = [
     ("men running shoes under 3000", "Running", ["shoes", "men"], ["shoe", "shoes", "footwear"], 3000.0),
     ("kids hiking shoes under 4000", "Hiking", ["shoes", "kids"], ["shoe", "shoes", "footwear"], 4000.0),
     ("camping chair", "Camping", ["chair"], ["chair", "chairs", "seat", "seats"], None),
+    ("waterproof backpack", "Hiking", ["waterproof", "backpack"], ["backpack", "backpacks", "bag", "bags"], None),
+    ("water repellent backpack", "Hiking", ["water", "repellent", "backpack"], ["backpack", "backpacks", "bag", "bags"], None),
+    ("golf club", "Golf", ["golf", "club"], ["club", "clubs", "putter", "driver", "iron", "wedge", "hybrid", "wood"], None),
+    ("football", "Football", ["football"], ["football", "footballs", "ball", "balls"], None),
+    ("yoga mat", "Yoga", ["yoga", "mat"], ["mat", "mats"], None),
+    ("camping tent", "Camping", ["camping", "tent"], ["tent", "tents"], None),
+    ("football backpack", "Football", ["football", "backpack"], ["backpack", "backpacks", "bag", "bags"], None),
 ]
 
 def main():
     search_service = HybridSearchService()
     
-    print("=" * 80)
-    # Print the known product types
-    print("KNOWN PRODUCT TYPES:", sorted(list(HybridSearchService.KNOWN_PRODUCT_TYPES)))
     print("=" * 80)
     print()
     

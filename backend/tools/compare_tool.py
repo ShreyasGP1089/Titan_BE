@@ -78,16 +78,17 @@ class CompareTool:
                 message = f"{len(missing_products)} of {len(product_refs)} products could not be resolved."
         
         # Generate comparison summary if exactly 2 products resolved
+        # NOTE: Temporarily disabled - requires /generate-comparison-summary endpoint
         comparison_summary = None
-        if len(resolved_products) == 2:
-            try:
-                comparison_summary = self._generate_comparison_summary(
-                    resolved_products[0],
-                    resolved_products[1]
-                )
-            except Exception as e:
-                logger.warning(f"Failed to generate comparison summary: {e}")
-                # Continue without comparison summary
+        # if len(resolved_products) == 2:
+        #     try:
+        #         comparison_summary = self._generate_comparison_summary(
+        #             resolved_products[0],
+        #             resolved_products[1]
+        #         )
+        #     except Exception as e:
+        #         logger.warning(f"Failed to generate comparison summary: {e}")
+        #         # Continue without comparison summary
         
         return CompareResponse(
             products=product_objects,
