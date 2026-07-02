@@ -85,9 +85,13 @@ class BudgetOptimizer:
                 msg = f"No products found for mandatory item: {item.name}"
                 logger.error(msg)
                 return {
-                    "success": False, "message": msg,
-                    "items": items, "total_cost": None,
-                    "within_budget": False, "budget_remaining": None
+                    "success": False, 
+                    "message": msg,
+                    "items": items, 
+                    "total_cost": None,
+                    "within_budget": False, 
+                    "budget_remaining": None,
+                    "minimum_budget_required": None
                 }
 
         # Score all products
@@ -113,9 +117,13 @@ class BudgetOptimizer:
                     msg = f"No products available for mandatory item: {item.name}"
                     logger.error(msg)
                     return {
-                        "success": False, "message": msg,
-                        "items": items, "total_cost": None,
-                        "within_budget": False, "budget_remaining": None
+                        "success": False, 
+                        "message": msg,
+                        "items": items, 
+                        "total_cost": None,
+                        "within_budget": False, 
+                        "budget_remaining": None,
+                        "minimum_budget_required": None
                     }
                 continue
             
@@ -145,9 +153,13 @@ class BudgetOptimizer:
                    f"Minimum required: ₹{min_cost:.2f}, Available: ₹{budget:.2f}")
             logger.error(msg)
             return {
-                "success": False, "message": msg,
-                "items": items, "total_cost": None,
-                "within_budget": False, "budget_remaining": None
+                "success": False, 
+                "message": msg,
+                "items": items, 
+                "total_cost": None,
+                "within_budget": False, 
+                "budget_remaining": None,
+                "minimum_budget_required": round(min_cost, 2)
             }
         
         # Extract selected products and calculate total
@@ -234,6 +246,7 @@ class BudgetOptimizer:
             "total_cost":       round(total_cost, 2),
             "within_budget":    total_cost <= budget,
             "budget_remaining": budget_remaining,
+            "minimum_budget_required": None  # Only set on failure
         }
     
     def _optimize_selection(

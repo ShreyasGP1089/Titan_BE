@@ -143,6 +143,8 @@ class TaskResponse(BaseModel):
     budget_remaining: Optional[float] = None  # budget - total_cost
     total_cost: Optional[float] = None
     within_budget: Optional[bool] = None
+    minimum_budget_required: Optional[float] = None  # Minimum budget needed for mandatory items
+    message: Optional[str] = None  # Error or informational message (e.g., budget insufficient)
     items: List[TaskItem]
     query: Optional[str] = None
 

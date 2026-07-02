@@ -81,13 +81,20 @@ class AlternativesTool:
                 logger.info(f"Budget constraint active: limit=₹{price_limit}")
             
             # Retrieve candidates via HybridSearchService
-            candidates = search_service.search(
+            search_result = search_service.search(
                 sport=sport,
                 category_level_1=category_level_1,
                 keywords=keywords,
                 price_limit=price_limit,
-                top_k=30
+                top_k=30,
+                return_format='flat'  # Get flat list of RELEVANT products only
             )
+            
+            # Ensure we have a list (backward compatibility check)
+            if isinstance(search_result, dict):
+                candidates = search_result.get('relevant', [])
+            else:
+                candidates = search_result or []
             
             # Exclude original product
             candidates = [c for c in candidates if c["product_id"] != source_product_id]
@@ -126,7 +133,7 @@ class AlternativesTool:
                 logger.info(f"Filter higher_rating > {source_rating} applied: {len(candidates)} candidates remaining")
                 
             # Filter: lower_price (CHEAPER ALTERNATIVES)
-            # Hard constraint: alternative.price <= source_product.price
+            # STRICT constraint: alternative.price < source_product.price (CHEAPER, not equal)
             # Guard: if budget_limit is set and exceeds source price, the user is
             # asking for "under X" (budget cap), not "cheaper than source".
             # The SLM sometimes conflates the two — skip lower_price in that case.
@@ -137,12 +144,19 @@ class AlternativesTool:
                 apply_lower_price = False
                 
             if apply_lower_price:
-                # Hard constraint: price <= source_price
+                # STRICT constraint: price < source_price (CHEAPER, not equal)
+                before_filter = len(candidates)
                 candidates = [
                     c for c in candidates
-                    if float(c.get("price") or 0.0) <= source_price
+                    if float(c.get("price") or 0.0) < source_price
                 ]
-                logger.info(f"Filter lower_price <= {source_price} applied: {len(candidates)} candidates remaining")
+                after_filter = len(candidates)
+                logger.info(f"Filter lower_price < {source_price} applied: {after_filter} candidates remaining (filtered out {before_filter - after_filter})")
+                logger.info(f"  Source product: {source_product.get('name')} (₹{source_price})")
+                if after_filter > 0 and after_filter <= 5:
+                    logger.info(f"  Cheaper alternatives found:")
+                    for idx, c in enumerate(candidates[:5], 1):
+                        logger.info(f"    {idx}. {c.get('name')} (₹{c.get('price')})")
                 
             # Filter: different_brand
             if constraints.get("different_brand"):
@@ -170,6 +184,22 @@ class AlternativesTool:
                     if c.get("review_count") is not None and int(c.get("review_count") or 0) > source_reviews
                 ]
                 logger.info(f"Filter more_reviews > {source_reviews} applied: {len(candidates)} candidates remaining")
+            
+            # Filter: premium (PREMIUM/EXPENSIVE ALTERNATIVES)
+            # STRICT constraint: alternative.price > source_product.price (MORE EXPENSIVE)
+            if constraints.get("premium"):
+                before_filter = len(candidates)
+                candidates = [
+                    c for c in candidates
+                    if float(c.get("price") or 0.0) > source_price
+                ]
+                after_filter = len(candidates)
+                logger.info(f"Filter premium > {source_price} applied: {after_filter} candidates remaining (filtered out {before_filter - after_filter})")
+                logger.info(f"  Source product: {source_product.get('name')} (₹{source_price})")
+                if after_filter > 0 and after_filter <= 5:
+                    logger.info(f"  Premium alternatives found:")
+                    for idx, c in enumerate(candidates[:5], 1):
+                        logger.info(f"    {idx}. {c.get('name')} (₹{c.get('price')})")
                 
             # Rank candidates
             if candidates:
@@ -239,12 +269,20 @@ class AlternativesTool:
             logger.info(f"  Category L1: {category_level_1}")
             logger.info(f"  Keywords: {keywords}")
             
-            candidates = search_service.search(
+            search_result = search_service.search(
                 sport=sport,
                 category_level_1=category_level_1,
                 keywords=keywords,
-                top_k=10
+                top_k=10,
+                return_format='flat'  # Get flat list of RELEVANT products only
             )
+            
+            # Ensure we have a list (backward compatibility check)
+            if isinstance(search_result, dict):
+                candidates = search_result.get('relevant', [])
+            else:
+                candidates = search_result or []
+            
             candidates = [c for c in candidates if c["product_id"] != source_product_id]
         elif not candidates:
             logger.info("SLM succeeded but constraints filtered all candidates. Returning empty results (no matching alternatives found).")
@@ -253,21 +291,23 @@ class AlternativesTool:
         # POST-RETRIEVAL CHEAPER ALTERNATIVES FILTER
         # When user explicitly asks for cheaper alternatives, filter by price
         # This works even when SLM is offline (uses query text matching)
+        # CRITICAL: This must filter BEFORE substitute validation to ensure
+        # expensive alternatives don't pass through
         # ================================================================
         if candidates and user_query:
             # Detect "cheaper alternatives" intent from user query
             query_lower = user_query.lower()
-            cheaper_keywords = ['cheap', 'lower price', 'lower-price', 'budget', 'affordable', 'less expensive', 'under']
+            cheaper_keywords = ['cheap', 'lower price', 'lower-price', 'budget', 'affordable', 'less expensive', 'under', 'cheaper']
             is_cheaper_intent = any(keyword in query_lower for keyword in cheaper_keywords)
             
             if is_cheaper_intent:
                 source_price = float(source_product.get("price") or 0.0)
                 before_count = len(candidates)
                 
-                # Hard constraint: price <= source_price
+                # STRICT constraint: price < source_price (CHEAPER, not equal)
                 candidates = [
                     c for c in candidates
-                    if float(c.get("price") or 0.0) <= source_price
+                    if float(c.get("price") or 0.0) < source_price
                 ]
                 
                 after_count = len(candidates)
@@ -277,7 +317,39 @@ class AlternativesTool:
                 logger.info(f"  Source product price: ₹{source_price}")
                 logger.info(f"  Candidates before filter: {before_count}")
                 logger.info(f"  Candidates after filter: {after_count}")
-                logger.info(f"  Filter: price <= {source_price}")
+                logger.info(f"  Filter: price < {source_price}")
+                logger.info("=" * 80)
+        
+        # ================================================================
+        # POST-RETRIEVAL PREMIUM ALTERNATIVES FILTER
+        # When user explicitly asks for premium/expensive alternatives, filter by price
+        # This works even when SLM is offline (uses query text matching)
+        # ================================================================
+        if candidates and user_query:
+            # Detect "premium alternatives" intent from user query
+            query_lower = user_query.lower()
+            premium_keywords = ['premium', 'expensive', 'better', 'higher price', 'higher-price', 'more expensive', 'upgrade', 'top', 'best', 'professional', 'pro']
+            is_premium_intent = any(keyword in query_lower for keyword in premium_keywords)
+            
+            if is_premium_intent:
+                source_price = float(source_product.get("price") or 0.0)
+                before_count = len(candidates)
+                
+                # STRICT constraint: price > source_price (MORE EXPENSIVE, not equal)
+                candidates = [
+                    c for c in candidates
+                    if float(c.get("price") or 0.0) > source_price
+                ]
+                
+                after_count = len(candidates)
+                logger.info("=" * 80)
+                logger.info("PREMIUM ALTERNATIVES FILTER (POST-RETRIEVAL)")
+                logger.info(f"  Detected premium intent from query: '{user_query}'")
+                logger.info(f"  Source product price: ₹{source_price}")
+                logger.info(f"  Candidates before filter: {before_count}")
+                logger.info(f"  Candidates after filter: {after_count}")
+                logger.info(f"  Filter: price > {source_price}")
+                logger.info("=" * 80)
                 logger.info("=" * 80)
         
         # ================================================================
