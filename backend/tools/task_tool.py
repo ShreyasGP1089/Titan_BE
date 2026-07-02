@@ -229,7 +229,7 @@ class TaskTool:
         if parser_items:
             logger.info(f"✓ Using PARSER items ({len(parser_items)} items provided)")
             logger.info("=" * 80)
-            logger.info("PARSER ITEMS:")
+            logger.info("PARSER ITEMS (RAW):")
             for idx, item in enumerate(parser_items, 1):
                 logger.info(f"  {idx}. {item.name} ({'mandatory' if item.mandatory else 'optional'})")
             logger.info("=" * 80)
@@ -240,12 +240,36 @@ class TaskTool:
                 for item in parser_items
             ]
             
+            # DEDUPLICATION: Remove duplicate items, keeping first occurrence
+            # Use case-insensitive comparison for product names
+            seen_names = set()
+            deduplicated_products = []
+            duplicates_removed = []
+            
+            for product in planned_products:
+                name_lower = product["name"].lower().strip()
+                if name_lower not in seen_names:
+                    seen_names.add(name_lower)
+                    deduplicated_products.append(product)
+                else:
+                    duplicates_removed.append(product["name"])
+            
+            if duplicates_removed:
+                logger.info("=" * 80)
+                logger.info("⚠️  DUPLICATES DETECTED AND REMOVED:")
+                logger.info(f"   Original count: {len(planned_products)}")
+                logger.info(f"   After deduplication: {len(deduplicated_products)}")
+                logger.info(f"   Removed: {duplicates_removed}")
+                logger.info("=" * 80)
+            
+            planned_products = deduplicated_products
+            
             # BOUNDARY 4: OUT OF _get_planned_products() (parser path)
             logger.info("=" * 80)
             logger.info("[OUTPUT FROM _get_planned_products()]")
             logger.info("=" * 80)
             logger.info("Source: parser")
-            logger.info("Items:")
+            logger.info("Items (after deduplication):")
             for idx, product in enumerate(planned_products, 1):
                 mandatory_str = "mandatory" if product["mandatory"] else "optional"
                 logger.info(f"  {idx}. {product['name']} ({mandatory_str})")
@@ -306,8 +330,31 @@ class TaskTool:
                     for item in planner_result["items"]
                 ]
                 
+                # DEDUPLICATION: Remove duplicate items
+                seen_names = set()
+                deduplicated_products = []
+                duplicates_removed = []
+                
+                for product in planned_products:
+                    name_lower = product["name"].lower().strip()
+                    if name_lower not in seen_names:
+                        seen_names.add(name_lower)
+                        deduplicated_products.append(product)
+                    else:
+                        duplicates_removed.append(product["name"])
+                
+                if duplicates_removed:
+                    logger.info("=" * 80)
+                    logger.info("⚠️  DUPLICATES DETECTED AND REMOVED:")
+                    logger.info(f"   Original count: {len(planned_products)}")
+                    logger.info(f"   After deduplication: {len(deduplicated_products)}")
+                    logger.info(f"   Removed: {duplicates_removed}")
+                    logger.info("=" * 80)
+                
+                planned_products = deduplicated_products
+                
                 logger.info("=" * 80)
-                logger.info("PLANNED PRODUCTS FROM PLANNER")
+                logger.info("PLANNED PRODUCTS FROM PLANNER (AFTER DEDUPLICATION)")
                 for idx, product in enumerate(planned_products, 1):
                     logger.info(f"  {idx}. {product['name']} ({'mandatory' if product['mandatory'] else 'optional'})")
                 logger.info("=" * 80)
@@ -344,6 +391,29 @@ class TaskTool:
                 }
                 for item in TASKS[activity]
             ]
+            
+            # DEDUPLICATION: Remove duplicate items (safety check for hardcoded tasks)
+            seen_names = set()
+            deduplicated_products = []
+            duplicates_removed = []
+            
+            for product in planned_products:
+                name_lower = product["name"].lower().strip()
+                if name_lower not in seen_names:
+                    seen_names.add(name_lower)
+                    deduplicated_products.append(product)
+                else:
+                    duplicates_removed.append(product["name"])
+            
+            if duplicates_removed:
+                logger.warning("=" * 80)
+                logger.warning("⚠️  DUPLICATES FOUND IN HARDCODED TASKS (FIX NEEDED):")
+                logger.warning(f"   Original count: {len(planned_products)}")
+                logger.warning(f"   After deduplication: {len(deduplicated_products)}")
+                logger.warning(f"   Removed: {duplicates_removed}")
+                logger.warning("=" * 80)
+            
+            planned_products = deduplicated_products
             
             # BOUNDARY 4: OUT OF _get_planned_products() (fallback path)
             logger.info("=" * 80)
