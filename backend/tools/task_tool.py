@@ -687,11 +687,38 @@ class TaskTool:
         total_cost = None
         within_budget = None
         budget_remaining = None
+        minimum_budget_required = None
+        error_message = None
+
+        # ================================================================
+        # DIAGNOSTIC: BUDGET OPTIMIZER ENTRY POINT
+        # ================================================================
+        logger.info("=" * 80)
+        logger.info("[BUDGET OPTIMIZER - ENTRY POINT]")
+        logger.info("=" * 80)
+        logger.info(f"Budget received: ₹{budget}")
+        logger.info(f"Items before optimizer: {len(items)}")
+        for idx, item in enumerate(items, 1):
+            product_count = len(item.products) if item.products else 0
+            cheapest = min(item.products, key=lambda p: p.price) if item.products else None
+            if cheapest:
+                logger.info(f"  {idx}. {item.name} ({product_count} products)")
+                logger.info(f"      Cheapest: ₹{cheapest.price:.2f} - {cheapest.name}")
+                logger.info(f"      Current recommended: {item.recommended.name if item.recommended else 'None'}")
+                logger.info(f"      Current budget_allocated: {item.budget_allocated}")
+            else:
+                logger.info(f"  {idx}. {item.name} (0 products)")
+        logger.info("=" * 80)
+        logger.info("")
 
         if budget:
             logger.info(f"Budget Optimization")
             logger.info(f"  Start: {t_budget_start:.3f}")
             logger.info(f"  Budget: ₹{budget}")
+            
+            logger.info("=" * 80)
+            logger.info("[CALLING BUDGET_OPTIMIZER.OPTIMIZE()]")
+            logger.info("=" * 80)
             
             optimized = self.budget_optimizer.optimize(
                 items=items,
@@ -699,13 +726,64 @@ class TaskTool:
                 user_profile=user_profile
             )
 
+            logger.info("=" * 80)
+            logger.info("[BUDGET_OPTIMIZER.OPTIMIZE() RETURNED]")
+            logger.info("=" * 80)
+            logger.info(f"Success: {optimized.get('success')}")
+            logger.info(f"Message: {optimized.get('message')}")
+            logger.info(f"Total cost: {optimized.get('total_cost')}")
+            logger.info(f"Within budget: {optimized.get('within_budget')}")
+            logger.info(f"Budget remaining: {optimized.get('budget_remaining')}")
+            logger.info(f"Minimum budget required: {optimized.get('minimum_budget_required')}")
+            logger.info(f"Items returned: {len(optimized.get('items', []))}")
+            logger.info("=" * 80)
+            logger.info("")
+
             if not optimized.get("success", True):
                 logger.error(f"Budget optimization failed: {optimized.get('message')}")
+                error_message = optimized.get('message')
             
-            items            = optimized["items"]
-            total_cost       = optimized.get("total_cost")
-            within_budget    = optimized.get("within_budget")
-            budget_remaining = optimized.get("budget_remaining")
+            items                    = optimized["items"]
+            total_cost               = optimized.get("total_cost")
+            within_budget            = optimized.get("within_budget")
+            budget_remaining         = optimized.get("budget_remaining")
+            minimum_budget_required  = optimized.get("minimum_budget_required")
+            
+            # ================================================================
+            # DIAGNOSTIC: AFTER OPTIMIZER
+            # ================================================================
+            logger.info("=" * 80)
+            logger.info("[AFTER BUDGET OPTIMIZER]")
+            logger.info("=" * 80)
+            logger.info(f"Variables captured:")
+            logger.info(f"  total_cost: {total_cost}")
+            logger.info(f"  within_budget: {within_budget}")
+            logger.info(f"  budget_remaining: {budget_remaining}")
+            logger.info(f"  minimum_budget_required: {minimum_budget_required}")
+            logger.info(f"  error_message: {error_message}")
+            logger.info("")
+            logger.info("Items after optimizer:")
+            running_total = 0.0
+            for idx, item in enumerate(items, 1):
+                logger.info(f"  {idx}. {item.name}")
+                if item.recommended:
+                    logger.info(f"      Recommended: {item.recommended.name}")
+                    logger.info(f"      Price: ₹{item.recommended.price:.2f}")
+                    logger.info(f"      budget_allocated: {item.budget_allocated}")
+                    if item.budget_allocated:
+                        running_total += item.budget_allocated
+                        logger.info(f"      Running total: ₹{running_total:.2f}")
+                else:
+                    logger.info(f"      Recommended: None")
+                    logger.info(f"      budget_allocated: {item.budget_allocated}")
+            logger.info("")
+            logger.info(f"Manual running total: ₹{running_total:.2f}")
+            if budget:
+                logger.info(f"Manual remaining: ₹{(budget - running_total):.2f}")
+            if minimum_budget_required:
+                logger.info(f"Minimum budget required: ₹{minimum_budget_required:.2f}")
+            logger.info("=" * 80)
+            logger.info("")
         else:
             logger.info(f"No Budget - Discovery Mode")
             logger.info(f"  Start: {t_budget_start:.3f}")
@@ -767,12 +845,19 @@ class TaskTool:
         # Response formatting
         t_formatting_start = time.time()
         
+        # Build user-friendly error message if budget insufficient
+        user_message = None
+        if minimum_budget_required and budget:
+            user_message = f"Sorry, the minimum budget required is ₹{minimum_budget_required:,.0f}. Your budget of ₹{budget:,.0f} is insufficient to cover all mandatory items."
+        
         response = TaskResponse(
             activity=activity,
             budget=budget,
             budget_remaining=budget_remaining,
             total_cost=total_cost or None,
             within_budget=within_budget,
+            minimum_budget_required=minimum_budget_required,
+            message=user_message,
             items=items,
             query=arguments.query,
         )
