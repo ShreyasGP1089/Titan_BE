@@ -19,11 +19,19 @@ class SearchRequest(BaseModel):
     price_limit: Optional[float] = Field(None, description="Maximum price", gt=0)
 
 
+class PlannedItem(BaseModel):
+    """A planned item from parser or planner"""
+    name: str
+    mandatory: bool
+    keywords: Optional[List[str]] = Field(default_factory=list)
+
+
 class TaskArguments(BaseModel):
     """Task intent arguments"""
     activity: str = Field(..., description="Activity name (e.g., 'Golf', 'Hiking')")
     budget: Optional[float] = Field(None, description="Total budget", gt=0)
     query: Optional[str] = Field(None, description="Original user query for profile inference")
+    items: Optional[List[PlannedItem]] = Field(None, description="Pre-planned items from parser (optional)")
 
 
 class CompareArguments(BaseModel):

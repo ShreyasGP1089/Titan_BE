@@ -8,6 +8,8 @@ import time
 from typing import List, Dict, Optional
 from models.schemas import TaskArguments, TaskResponse, TaskItem, Product
 from services.hybrid_search import HybridSearchService
+from services.planner_service import PlannerService
+from services.search_query_parser_service import SearchQueryParserService
 from tools.budget_optimizer import BudgetOptimizer
 
 logger = logging.getLogger(__name__)
@@ -165,7 +167,199 @@ class TaskTool:
     
     def __init__(self):
         self.search_service = HybridSearchService()
+        self.planner_service = PlannerService()
+        self.search_query_parser = SearchQueryParserService()
         self.budget_optimizer = BudgetOptimizer()
+    
+    def _parse_product_to_search_request(self, product_name: str, sport: str) -> Dict:
+        """
+        Parse a product name into an optimal search request using Search Query Parser.
+        
+        This replaces the old _create_search_request_from_product_name() method
+        with an SLM-based parser that determines optimal categories and keywords.
+        
+        Args:
+            product_name: Product name from planner (e.g., "Golf Shirt")
+            sport: Sport name for context
+        
+        Returns:
+            Dict with sport, category_level_1, category_level_2, keywords
+        
+        Examples:
+            "Golf Shirt" → {"sport": "Golf", "category_level_1": "Apparel", "keywords": ["golf shirt"]}
+            "Running Shoes" → {"sport": "Running", "category_level_1": "Footwear", "keywords": ["running shoes"]}
+        """
+        return self.search_query_parser.parse_search_query(product_name, sport)
+    
+    def _get_planned_products(
+        self,
+        activity: str,
+        sport: str,
+        user_query: Optional[str] = None,
+        parser_items: Optional[List] = None
+    ) -> tuple[List[Dict], str]:
+        """
+        Get planned products from multiple sources (priority order):
+        1. Parser items (if provided)
+        2. Dynamic planner
+        3. Fallback to TASKS dictionary
+        
+        Args:
+            activity: Activity name
+            sport: Sport name
+            user_query: Optional user query for context
+            parser_items: Optional pre-planned items from parser
+        
+        Returns:
+            Tuple of (planned_products_list, source)
+            where source is "parser", "dynamic", or "fallback"
+            
+            planned_products_list format:
+            [
+                {"name": "Golf Shirt", "mandatory": True},
+                {"name": "Golf Shorts", "mandatory": True},
+                ...
+            ]
+        """
+        logger.info("=" * 80)
+        logger.info("PLANNED PRODUCTS RESOLUTION")
+        logger.info("=" * 80)
+        
+        # PRIORITY 1: Use parser items if provided
+        if parser_items:
+            logger.info(f"✓ Using PARSER items ({len(parser_items)} items provided)")
+            logger.info("=" * 80)
+            logger.info("PARSER ITEMS:")
+            for idx, item in enumerate(parser_items, 1):
+                logger.info(f"  {idx}. {item.name} ({'mandatory' if item.mandatory else 'optional'})")
+            logger.info("=" * 80)
+            
+            # Convert parser items to simple format
+            planned_products = [
+                {"name": item.name, "mandatory": item.mandatory}
+                for item in parser_items
+            ]
+            
+            # BOUNDARY 4: OUT OF _get_planned_products() (parser path)
+            logger.info("=" * 80)
+            logger.info("[OUTPUT FROM _get_planned_products()]")
+            logger.info("=" * 80)
+            logger.info("Source: parser")
+            logger.info("Items:")
+            for idx, product in enumerate(planned_products, 1):
+                mandatory_str = "mandatory" if product["mandatory"] else "optional"
+                logger.info(f"  {idx}. {product['name']} ({mandatory_str})")
+            logger.info("=" * 80)
+            
+            return planned_products, "parser"
+        
+        # PRIORITY 2: Try dynamic planner
+        logger.info(f"No parser items provided. Attempting dynamic planner for: {activity}")
+        logger.info("=" * 80)
+        
+        planner_result = self.planner_service.plan_task(
+            activity=activity,
+            sport=sport,
+            user_query=user_query
+        )
+        
+        # BOUNDARY 1: PLANNER OUTPUT
+        logger.info("=" * 80)
+        logger.info("[PLANNER OUTPUT]")
+        logger.info("=" * 80)
+        if planner_result and planner_result.get("items"):
+            logger.info("Items returned:")
+            for idx, item in enumerate(planner_result["items"], 1):
+                mandatory_str = "mandatory" if item.get("mandatory", True) else "optional"
+                logger.info(f"  {idx}. {item.get('name')} ({mandatory_str})")
+            logger.info(f"Confidence: {planner_result.get('confidence', 0.0):.2f}")
+        else:
+            logger.info("No items returned")
+        logger.info("=" * 80)
+        
+        if planner_result and planner_result.get("items"):
+            # Check confidence threshold
+            confidence = planner_result.get("confidence", 0.0)
+            
+            # BOUNDARY 3: INSIDE _get_planned_products() - DECISION POINT
+            logger.info("=" * 80)
+            logger.info("[_get_planned_products() DECISION]")
+            logger.info("=" * 80)
+            logger.info("Planner returned:")
+            for idx, item in enumerate(planner_result["items"], 1):
+                mandatory_str = "mandatory" if item.get("mandatory", True) else "optional"
+                logger.info(f"  {idx}. {item.get('name')} ({mandatory_str})")
+            logger.info(f"Confidence: {confidence:.2f}")
+            logger.info(f"Threshold: 0.5")
+            
+            if confidence >= 0.5:  # Confidence threshold
+                logger.info("Decision: ✓ ACCEPT (confidence >= threshold)")
+                logger.info("=" * 80)
+                logger.info(f"✓ Using DYNAMIC planner (confidence: {confidence:.2f})")
+                
+                # Convert planner items to simple planned products format
+                planned_products = [
+                    {
+                        "name": item.get("name"),
+                        "mandatory": item.get("mandatory", True)
+                    }
+                    for item in planner_result["items"]
+                ]
+                
+                logger.info("=" * 80)
+                logger.info("PLANNED PRODUCTS FROM PLANNER")
+                for idx, product in enumerate(planned_products, 1):
+                    logger.info(f"  {idx}. {product['name']} ({'mandatory' if product['mandatory'] else 'optional'})")
+                logger.info("=" * 80)
+                
+                # BOUNDARY 4: OUT OF _get_planned_products()
+                logger.info("=" * 80)
+                logger.info("[OUTPUT FROM _get_planned_products()]")
+                logger.info("=" * 80)
+                logger.info("Source: dynamic")
+                logger.info("Items:")
+                for idx, product in enumerate(planned_products, 1):
+                    mandatory_str = "mandatory" if product["mandatory"] else "optional"
+                    logger.info(f"  {idx}. {product['name']} ({mandatory_str})")
+                logger.info("=" * 80)
+                
+                return planned_products, "dynamic"
+            else:
+                logger.info("Decision: ✗ REJECT (confidence < threshold)")
+                logger.info("Triggering fallback to TASKS")
+                logger.info("=" * 80)
+                logger.warning(f"⚠️  Planner confidence too low: {confidence:.2f} (threshold: 0.5)")
+        else:
+            logger.warning("⚠️  Dynamic planner failed or returned no items")
+        
+        # PRIORITY 3: Fallback to hardcoded TASKS
+        if activity in TASKS:
+            logger.info(f"→ Falling back to HARDCODED task definition")
+            
+            # Convert TASKS format to simple planned products format
+            planned_products = [
+                {
+                    "name": item["name"],
+                    "mandatory": item["mandatory"]
+                }
+                for item in TASKS[activity]
+            ]
+            
+            # BOUNDARY 4: OUT OF _get_planned_products() (fallback path)
+            logger.info("=" * 80)
+            logger.info("[OUTPUT FROM _get_planned_products()]")
+            logger.info("=" * 80)
+            logger.info("Source: fallback")
+            logger.info("Items:")
+            for idx, product in enumerate(planned_products, 1):
+                mandatory_str = "mandatory" if product["mandatory"] else "optional"
+                logger.info(f"  {idx}. {product['name']} ({mandatory_str})")
+            logger.info("=" * 80)
+            
+            return planned_products, "fallback"
+        else:
+            logger.error(f"❌ No task definition found for: {activity}")
+            raise ValueError(f"Activity '{activity}' not supported. Supported: {list(TASKS.keys())}")
     
     def validate_product_for_item(
         self,
@@ -223,13 +417,19 @@ class TaskTool:
     
     def execute(self, arguments: TaskArguments) -> TaskResponse:
         """
-        Execute task request.
+        Execute task request using product-centric architecture.
         
         Flow:
-            1. Get task definition for activity
-            2. Search products for each item
-            3. If budget exists, optimize budget
-            4. Return grouped results
+            1. Get planned products (from parser, planner, or fallback)
+            2. FOR EACH planned product:
+               - Create search request
+               - Call Hybrid Search (handles retrieval + validation)
+               - Collect results
+            3. Budget optimization
+            4. Return bundle
+        
+        Each planned product is treated as an independent search,
+        exactly as if the user searched for that product individually.
         
         Args:
             arguments: TaskArguments with activity and optional budget
@@ -245,116 +445,206 @@ class TaskTool:
         
         activity = arguments.activity
         budget = arguments.budget
+        user_query = arguments.query
+        parser_items = arguments.items
+        
+        logger.info("=" * 80)
+        logger.info("STAGE 3: TaskTool.execute() RECEIVED TaskArguments")
+        logger.info("=" * 80)
+        logger.info(f"Activity: {activity}")
+        logger.info(f"Budget: {budget}")
+        logger.info(f"User Query: {user_query}")
+        if parser_items:
+            logger.info(f"Parser Items RECEIVED: {len(parser_items)} items")
+            for idx, item in enumerate(parser_items, 1):
+                logger.info(f"  {idx}. {item.name} ({'mandatory' if item.mandatory else 'optional'})")
+        else:
+            logger.info(f"Parser Items RECEIVED: None")
+        logger.info("=" * 80)
         
         logger.info("=" * 80)
         logger.info(f"TASK PERFORMANCE PROFILE")
         logger.info(f"Activity: {activity}, Budget: {budget}")
+        logger.info(f"User Query: {user_query}")
+        logger.info(f"Parser Items: {len(parser_items) if parser_items else 0}")
         logger.info("=" * 80)
         
-        # Get task definition
-        if activity not in TASKS:
-            logger.error(f"Unknown activity: {activity}")
-            raise ValueError(f"Activity '{activity}' not supported. Supported: {list(TASKS.keys())}")
+        # Get planned products (simple list of product names + mandatory flag)
+        sport = activity  # Extract sport from activity
         
-        task_definition = TASKS[activity]
+        planned_products, definition_source = self._get_planned_products(
+            activity=activity,
+            sport=sport,
+            user_query=user_query,
+            parser_items=parser_items
+        )
+        
+        logger.info("=" * 80)
+        logger.info("STAGE 4: AFTER _get_planned_products()")
+        logger.info("=" * 80)
+        logger.info(f"Product source: {definition_source}")
+        logger.info(f"Products to search: {len(planned_products)}")
+        logger.info("PLANNED PRODUCTS LIST:")
+        for idx, product in enumerate(planned_products, 1):
+            mandatory_str = "mandatory" if product["mandatory"] else "optional"
+            logger.info(f"  {idx}. {product['name']} ({mandatory_str})")
+        logger.info("=" * 80)
+        logger.info("")
         
         # Infer user profile once for the entire task
-        user_profile = infer_user_profile(arguments.query or "")
+        user_profile = infer_user_profile(user_query or "")
         
         t_parsing_end = time.time()
         t_parsing_duration = (t_parsing_end - t_parsing_start) * 1000
         
-        logger.info(f"Task Parsing")
-        logger.info(f"  Start: {t_parsing_start:.3f}")
-        logger.info(f"  End: {t_parsing_end:.3f}")
+        logger.info(f"Task Parsing & Planning")
         logger.info(f"  Duration: {t_parsing_duration:.1f} ms")
+        logger.info(f"  Source: {definition_source.upper()}")
         logger.info("-" * 80)
         
         # Performance tracking
         perf_items = []
         total_search_time = 0
-        total_validation_time = 0
         total_products_retrieved = 0
-        total_products_validated = 0
-        total_products_rejected = 0
         
-        # Search products for each item
+        # Search products for each planned product
         items = []
         all_products = {}
         
-        logger.info(f"Searching for {len(task_definition)} items:")
-        for idx, item_def in enumerate(task_definition, 1):
-            logger.info(f"  {idx}. {item_def['name']}")
+        # BOUNDARY 5: ENTERING SEARCH LOOP
+        logger.info("=" * 80)
+        logger.info("[SEARCH LOOP START]")
+        logger.info("=" * 80)
+        logger.info(f"Items to search: {len(planned_products)}")
+        logger.info("Loop will search:")
+        for idx, planned_product in enumerate(planned_products, 1):
+            mandatory_str = "mandatory" if planned_product["mandatory"] else "optional"
+            logger.info(f"  {idx}. {planned_product['name']} ({mandatory_str})")
+        logger.info("=" * 80)
         logger.info("")
         
-        for item_index, item_def in enumerate(task_definition, 1):
-            item_name = item_def["name"]
-            mandatory = item_def["mandatory"]
-            keywords = item_def["keywords"]
-            validation_keywords = item_def.get("validation_keywords", keywords)
-            negative_keywords = item_def.get("negative_keywords", [])
-            sport = item_def.get("sport", activity)
-            category = item_def.get("category")
+        for item_index, planned_product in enumerate(planned_products, 1):
+            product_name = planned_product["name"]
+            mandatory = planned_product["mandatory"]
             
-            logger.info("-" * 80)
-            logger.info(f"ITEM {item_index}/{len(task_definition)}: {item_name}")
-            logger.info("-" * 80)
+            # BOUNDARY 6: FOR EACH ITEM - EXTRACTION
+            logger.info("=" * 80)
+            logger.info(f"[SEARCH LOOP ITERATION {item_index}/{len(planned_products)}]")
+            logger.info("=" * 80)
+            logger.info("Extracted from planned_products:")
+            logger.info(f"  product_name: \"{product_name}\"")
+            logger.info(f"  mandatory: {mandatory}")
+            logger.info("=" * 80)
+            logger.info("")
+            
+            logger.info("=" * 80)
+            logger.info(f"PRODUCT {item_index}/{len(planned_products)}: {product_name}")
+            logger.info("=" * 80)
+            
+            # BOUNDARY 7: INTO parse-search-query
+            logger.info("=" * 80)
+            logger.info("[INPUT TO parse-search-query]")
+            logger.info("=" * 80)
+            logger.info(f"Product name: \"{product_name}\"")
+            logger.info(f"Sport: \"{sport}\"")
+            logger.info("=" * 80)
+            
+            # Parse product name into optimal search request using Search Query Parser
+            search_request = self._parse_product_to_search_request(product_name, sport)
+            
+            # BOUNDARY 8: OUT OF parse-search-query
+            logger.info("=" * 80)
+            logger.info("[OUTPUT FROM parse-search-query]")
+            logger.info("=" * 80)
+            logger.info(f"Input was: \"{product_name}\"")
+            logger.info("Output:")
+            logger.info(f"  sport: {search_request['sport']}")
+            logger.info(f"  category_level_1: {search_request.get('category_level_1')}")
+            logger.info(f"  keywords: {search_request['keywords']}")
+            logger.info("=" * 80)
+            
+            logger.info("=" * 80)
+            logger.info("HYBRID SEARCH REQUEST")
+            logger.info(f"  Planner Item: {product_name}")
+            logger.info(f"  Search Parameters:")
+            logger.info(f"    sport: {search_request['sport']}")
+            logger.info(f"    category: {search_request.get('category_level_1')}")
+            logger.info(f"    keywords: {search_request['keywords']}")
+            logger.info("=" * 80)
+            
+            # BOUNDARY 9: INTO HYBRID SEARCH
+            logger.info("=" * 80)
+            logger.info("[INPUT TO HYBRID SEARCH]")
+            logger.info("=" * 80)
+            logger.info(f"For planner item: \"{product_name}\"")
+            logger.info("Arguments:")
+            logger.info(f"  sport: {search_request['sport']}")
+            logger.info(f"  category_level_1: {search_request.get('category_level_1')}")
+            logger.info(f"  keywords: {search_request['keywords']}")
+            logger.info(f"  price_limit: {budget}")
+            logger.info(f"  top_k: 20")
+            logger.info("=" * 80)
+            
+            # ADDITIONAL GRANULAR LOGGING: Verify variables before search
+            logger.info("=" * 80)
+            logger.info("SEARCH LOOP - IMMEDIATE PRE-SEARCH CHECK")
+            logger.info(f"Current planned_product dict: {planned_product}")
+            logger.info(f"Product name variable: \"{product_name}\"")
+            logger.info(f"Mandatory variable: {mandatory}")
+            logger.info("=" * 80)
             
             t_item_search_start = time.time()
             
-            # Search products
-            products = self.search_service.search(
-                sport=sport,
-                category_level_1=category,
-                keywords=keywords,
+            # Call Hybrid Search - it handles retrieval + validation
+            search_result = self.search_service.search(
+                sport=search_request["sport"],
+                category_level_1=search_request.get("category_level_1"),
+                keywords=search_request["keywords"],
                 price_limit=budget,
                 top_k=20,
-                return_format='flat'
+                return_format='dict'  # Get both RELEVANT and RELATED
             )
             
             t_item_search_end = time.time()
             t_item_search_duration = (t_item_search_end - t_item_search_start) * 1000
             total_search_time += t_item_search_duration
             
-            candidates_retrieved = len(products)
-            total_products_retrieved += candidates_retrieved
+            # Extract RELEVANT products (Hybrid Search already validated)
+            relevant_products = search_result.get('relevant', [])
+            related_products = search_result.get('related', [])
             
-            logger.info(f"Search Duration: {t_item_search_duration:.1f} ms")
-            logger.info(f"Candidates Retrieved: {candidates_retrieved}")
+            # BOUNDARY 10: OUT OF HYBRID SEARCH
+            logger.info("=" * 80)
+            logger.info("[OUTPUT FROM HYBRID SEARCH]")
+            logger.info("=" * 80)
+            logger.info(f"For planner item: \"{product_name}\"")
+            logger.info(f"RELEVANT: {len(relevant_products)} products")
+            if relevant_products:
+                logger.info("Top products:")
+                for p in relevant_products[:5]:
+                    logger.info(f"  - {p['name']} (₹{p['price']})")
+                if len(relevant_products) > 5:
+                    logger.info(f"  ... and {len(relevant_products) - 5} more")
+            logger.info(f"RELATED: {len(related_products)} products")
+            logger.info("=" * 80)
             
-            # Validation
-            t_item_validation_start = time.time()
+            candidates_retrieved = len(relevant_products)
+            candidates_sent_to_validator = min(candidates_retrieved, 25)  # Hybrid Search validates top 25
+            total_products_retrieved += len(relevant_products)
             
-            validated_products = []
-            rejected_products = []
-            
-            for product in products:
-                is_valid = self.validate_product_for_item(product, validation_keywords, negative_keywords)
-                
-                if is_valid:
-                    validated_products.append(product)
-                else:
-                    rejected_products.append(product)
-            
-            t_item_validation_end = time.time()
-            t_item_validation_duration = (t_item_validation_end - t_item_validation_start) * 1000
-            total_validation_time += t_item_validation_duration
-            
-            candidates_validated = len(validated_products)
-            candidates_rejected = len(rejected_products)
-            total_products_validated += candidates_validated
-            total_products_rejected += candidates_rejected
-            
-            logger.info(f"Validation Duration: {t_item_validation_duration:.1f} ms")
-            logger.info(f"Candidates Validated: {candidates_validated}")
-            logger.info(f"Candidates Rejected: {candidates_rejected}")
-            
-            if rejected_products:
-                logger.info(f"Validation Success Rate: {candidates_validated}/{candidates_retrieved} ({candidates_validated/candidates_retrieved*100:.1f}%)")
+            logger.info("=" * 80)
+            logger.info("RETRIEVAL & VALIDATION COMPLETE")
+            logger.info(f"  Planner Item: {product_name}")
+            logger.info(f"  Duration: {t_item_search_duration:.1f} ms")
+            logger.info(f"  Candidates Retrieved: {candidates_retrieved + len(related_products)}")
+            logger.info(f"  Candidates Sent To Validator: {candidates_sent_to_validator}")
+            logger.info(f"  RELEVANT products: {len(relevant_products)}")
+            logger.info(f"  RELATED products: {len(related_products)}")
+            logger.info("=" * 80)
             
             # Convert to Product objects
             product_objects = []
-            for p in validated_products:
+            for p in relevant_products:
                 p_dict = dict(p)
                 if "similarity" not in p_dict and "final_score" in p_dict:
                     p_dict["similarity"] = p_dict["final_score"]
@@ -363,14 +653,14 @@ class TaskTool:
                 product_objects.append(prod)
             
             if not product_objects and mandatory:
-                logger.warning(f"  ⚠️  No valid products found for mandatory item: {item_name}")
+                logger.warning(f"  ⚠️  No valid products found for mandatory product: {product_name}")
             
             # Store for budget optimization
-            all_products[item_name] = product_objects
+            all_products[product_name] = product_objects
             
             # Create TaskItem
             task_item = TaskItem(
-                name=item_name,
+                name=product_name,
                 mandatory=mandatory,
                 products=product_objects
             )
@@ -378,19 +668,16 @@ class TaskTool:
             
             # Track item performance
             perf_items.append({
-                "name": item_name,
+                "name": product_name,
                 "search_ms": t_item_search_duration,
-                "validation_ms": t_item_validation_duration,
-                "retrieved": candidates_retrieved,
-                "validated": candidates_validated,
-                "rejected": candidates_rejected
+                "retrieved": len(relevant_products)
             })
             
-            logger.info(f"✓ Item '{item_name}' complete")
+            logger.info(f"✓ Product '{product_name}' search complete")
             logger.info("")
         
         logger.info("=" * 80)
-        logger.info("ALL ITEM SEARCHES COMPLETE")
+        logger.info("ALL PRODUCT SEARCHES COMPLETE")
         logger.info("=" * 80)
         logger.info("")
         
@@ -436,6 +723,47 @@ class TaskTool:
         logger.info(f"  Duration: {t_budget_duration:.1f} ms")
         logger.info("")
         
+        # Log final bundle before response formatting
+        # BOUNDARY 11: FINAL BUNDLE
+        logger.info("=" * 80)
+        logger.info("[FINAL BUNDLE]")
+        logger.info("=" * 80)
+        logger.info("Items in bundle:")
+        for idx, item in enumerate(items, 1):
+            if item.recommended:
+                logger.info(f"  {idx}. {item.name}")
+                logger.info(f"     Selected: {item.recommended.name} (₹{item.recommended.price})")
+            else:
+                logger.info(f"  {idx}. {item.name}")
+                logger.info(f"     Selected: None (no products found)")
+        if total_cost:
+            logger.info(f"Total: ₹{total_cost}")
+        logger.info("=" * 80)
+        
+        logger.info("=" * 80)
+        logger.info("FINAL TASK RESULT")
+        logger.info("=" * 80)
+        for idx, item in enumerate(items, 1):
+            if item.recommended:
+                logger.info(f"  Planner Item: {item.name}")
+                logger.info(f"    Selected: {item.recommended.name}")
+                logger.info(f"    Price: ₹{item.recommended.price}")
+            else:
+                logger.info(f"  Planner Item: {item.name}")
+                logger.info(f"    Selected: None (no products found)")
+        
+        if total_cost:
+            logger.info(f"  Estimated Total: ₹{total_cost:,.0f}")
+        if budget:
+            logger.info(f"  Budget: ₹{budget:,.0f}")
+            if within_budget is not None:
+                status = "✓ Within Budget" if within_budget else "✗ Over Budget"
+                logger.info(f"  Status: {status}")
+            if budget_remaining is not None:
+                logger.info(f"  Remaining: ₹{budget_remaining:,.0f}")
+        logger.info("=" * 80)
+        logger.info("")
+        
         # Response formatting
         t_formatting_start = time.time()
         
@@ -461,9 +789,8 @@ class TaskTool:
         logger.info("=" * 80)
         logger.info("PERFORMANCE SUMMARY")
         logger.info("=" * 80)
-        logger.info(f"Task Parsing: {t_parsing_duration:.1f} ms")
-        logger.info(f"Retrieval: {total_search_time:.1f} ms ({total_search_time/t_task_total*100:.1f}%)")
-        logger.info(f"Validation: {total_validation_time:.1f} ms ({total_validation_time/t_task_total*100:.1f}%)")
+        logger.info(f"Task Parsing & Planning: {t_parsing_duration:.1f} ms")
+        logger.info(f"Product Search (Hybrid Search + Validation): {total_search_time:.1f} ms ({total_search_time/t_task_total*100:.1f}%)")
         logger.info(f"Budget Optimization: {t_budget_duration:.1f} ms ({t_budget_duration/t_task_total*100:.1f}%)")
         logger.info(f"Response Formatting: {t_formatting_duration:.1f} ms")
         logger.info("-" * 80)
@@ -472,23 +799,15 @@ class TaskTool:
         logger.info("")
         logger.info("SEARCH STATISTICS")
         logger.info("=" * 80)
-        logger.info(f"Total Products Retrieved: {total_products_retrieved}")
-        logger.info(f"Total Products Validated: {total_products_validated}")
-        logger.info(f"Total Products Rejected: {total_products_rejected}")
-        logger.info(f"Overall Validation Rate: {total_products_validated}/{total_products_retrieved} ({total_products_validated/total_products_retrieved*100:.1f}%)")
+        logger.info(f"Total RELEVANT Products Retrieved: {total_products_retrieved}")
         logger.info("=" * 80)
         logger.info("")
-        logger.info("PER-ITEM BREAKDOWN")
+        logger.info("PER-PRODUCT BREAKDOWN")
         logger.info("=" * 80)
         for item_perf in perf_items:
             logger.info(f"{item_perf['name']}")
-            logger.info(f"  Search: {item_perf['search_ms']:.1f} ms")
-            logger.info(f"  Validation: {item_perf['validation_ms']:.1f} ms")
-            logger.info(f"  Retrieved: {item_perf['retrieved']}")
-            logger.info(f"  Validated: {item_perf['validated']}")
-            logger.info(f"  Rejected: {item_perf['rejected']}")
-            if item_perf['retrieved'] > 0:
-                logger.info(f"  Success Rate: {item_perf['validated']}/{item_perf['retrieved']} ({item_perf['validated']/item_perf['retrieved']*100:.1f}%)")
+            logger.info(f"  Search + Validation: {item_perf['search_ms']:.1f} ms")
+            logger.info(f"  RELEVANT products: {item_perf['retrieved']}")
         logger.info("=" * 80)
         
         return response

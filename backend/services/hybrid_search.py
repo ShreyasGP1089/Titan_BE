@@ -912,9 +912,18 @@ class HybridSearchService:
             
         query_text = " ".join(query_parts)
         
-        # Send a broader set to hybrid ranking so we have enough for the validator
-        # Keep this small enough to avoid validator timeouts (~5s per candidate on local model)
-        ranking_limit = max(top_k + 5, 15)
+        # For search intents: send top 25 candidates to SLM validator
+        # For task intents: keep at top_k (usually 20 from task tool)
+        # Search intents benefit more from increased validation because they're
+        # interactive user queries where recall is critical.
+        # Task intents already iterate multiple times (one per item), so keeping
+        # validation focused is better for performance.
+        if return_format == 'dict':
+            # Search intent: increase to 25 for better recall
+            ranking_limit = 25
+        else:
+            # Task intent: use top_k (typically 20)
+            ranking_limit = top_k
         
         ranked_products = self.hybrid_rank(
             query_text=query_text,
@@ -937,25 +946,99 @@ class HybridSearchService:
         
         logger.info(">>> ENTERING LLM VALIDATION")
         
-        # Determine if we have a product-type query that needs validation
+        # =====================================================================
+        # CANONICAL PRODUCT EXTRACTION
+        # =====================================================================
+        # Identifies the canonical product phrase from keywords by filtering out
+        # adjectives and attributes that are search filters, not product names.
+        #
+        # This is NOT simple concatenation - it identifies the actual product.
+        #
+        # Examples:
+        #   Keywords                              → Canonical Product
+        #   ["golf", "club"]                      → "golf club"
+        #   ["football", "shoes"]                 → "football shoes"
+        #   ["waterproof", "hiking", "shoes"]     → "hiking shoes"
+        #   ["men", "running", "shoes"]           → "running shoes"
+        #   ["women", "golf", "shirt"]            → "golf shirt"
+        #   ["red", "football", "jersey"]         → "football jersey"
+        #
+        # Adjectives/attributes are filters (NOT part of the product type):
+        #   - Colors: red, blue, green, black, white, yellow, pink, grey
+        #   - Gender/age: men, mens, women, womens, kids, junior, senior
+        #   - Size: large, small, medium, xl, xxl
+        #   - Features: waterproof, lightweight, breathable, durable
+        #   - Quality: cheap, premium, pro, professional, beginner
+        #   - Modifiers: best, top, good, show, me, find, get
+        
         product_type = None
         if keywords:
-            for kw in keywords:
-                kw_lower = kw.lower()
-                # Use a lightweight check: if the keyword appears to be a product noun
-                # (not a descriptive adjective), treat it as the product type for validation
-                if kw_lower not in {'waterproof', 'water', 'repellent', 'resistant',
-                                     'lightweight', 'heavy', 'men', 'mens', 'women', 'womens',
-                                     'kids', 'junior', 'senior', 'large', 'small', 'medium',
-                                     'red', 'blue', 'green', 'black', 'white', 'yellow',
-                                     'pink', 'grey', 'gray', 'cheap', 'premium', 'pro',
-                                     'professional', 'beginner', 'outdoor', 'indoor',
-                                     'foldable', 'portable', 'compact', 'under', 'above', 'below',
-                                     'show', 'me', 'find', 'get', 'best', 'top', 'good'}:
-                    product_type = kw_lower
-                    break
+            # Comprehensive exclusion set: adjectives, not product nouns
+            adjective_filters = {
+                # Features
+                'waterproof', 'water', 'repellent', 'resistant', 'breathable',
+                'lightweight', 'heavy', 'durable', 'flexible', 'stretchy',
+                'insulated', 'thermal', 'warm', 'cool', 'soft', 'hard',
+                'foldable', 'portable', 'compact', 'collapsible',
+                # Gender/Age
+                'men', 'mens', "men's", 'women', 'womens', "women's",
+                'kids', 'junior', 'senior', 'youth', 'adult', 'unisex',
+                'boys', 'girls', 'toddler', 'infant',
+                # Size
+                'large', 'small', 'medium', 'xl', 'xxl', 'xs', 's', 'm', 'l',
+                'big', 'tiny', 'mini', 'maxi', 'oversized',
+                # Colors
+                'red', 'blue', 'green', 'black', 'white', 'yellow',
+                'pink', 'grey', 'gray', 'orange', 'purple', 'brown',
+                'navy', 'maroon', 'beige', 'tan', 'silver', 'gold',
+                # Quality/Price
+                'cheap', 'expensive', 'premium', 'pro', 'professional',
+                'beginner', 'intermediate', 'advanced', 'elite',
+                'budget', 'affordable', 'luxury', 'basic', 'standard',
+                # Location/Use
+                'outdoor', 'indoor', 'home', 'gym', 'travel', 'office',
+                # Action words
+                'under', 'above', 'below', 'less', 'more', 'around',
+                'show', 'me', 'find', 'get', 'need', 'want', 'looking',
+                'best', 'top', 'good', 'great', 'excellent', 'quality',
+                # Material (sometimes filters, not product names)
+                'cotton', 'polyester', 'leather', 'synthetic', 'mesh',
+                'nylon', 'canvas', 'rubber', 'plastic', 'metal'
+            }
+            
+            # If single keyword, use it directly (already canonical)
+            if len(keywords) == 1:
+                product_type = keywords[0].lower()
+            else:
+                # Filter out adjectives/attributes to identify the product phrase
+                # This identifies the actual product, not just concatenates words
+                product_keywords = [
+                    kw for kw in keywords
+                    if kw.lower() not in adjective_filters
+                ]
+                
+                if product_keywords:
+                    # Join the product phrase components (the actual product words)
+                    # Examples:
+                    #   ["golf", "club"] → "golf club"
+                    #   ["hiking", "shoes"] (from ["waterproof", "hiking", "shoes"]) → "hiking shoes"
+                    #   ["running", "shoes"] (from ["men", "running", "shoes"]) → "running shoes"
+                    #   ["golf", "shirt"] (from ["women", "golf", "shirt"]) → "golf shirt"
+                    product_type = " ".join(product_keywords).lower()
+                elif keywords:
+                    # Fallback: if all keywords are filters, use them anyway
+                    # (Better than returning None)
+                    product_type = " ".join(keywords).lower()
         
         if product_type:
+            # GRANULAR VALIDATION LOGGING
+            logger.info("=" * 80)
+            logger.info("VALIDATOR INPUT")
+            logger.info(f"Keywords received: {keywords}")
+            logger.info(f"Canonical product type extracted: '{product_type}'")
+            logger.info(f"Candidates to validate: {len(ranked_products)}")
+            logger.info("=" * 80)
+            
             logger.info("🤖" + "=" * 79)
             logger.info(f"🤖 LLM VALIDATION STAGE")
             logger.info(f"   Product type requested: '{product_type}'")

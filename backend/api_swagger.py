@@ -430,16 +430,33 @@ class QueryEndpoint(Resource):
                     logger.info(f"[REQUEST {request_id}] SearchTool completed")
                     
                 elif intent == 'task':
-                    from models.schemas import TaskArguments
+                    from models.schemas import TaskArguments, PlannedItem
                     logger.info(f"[REQUEST {request_id}] Executing TaskTool")
                     logger.info("=" * 80)
                     logger.info(f"PARSED OUTPUT: {parsed}")
                     logger.info("=" * 80)
                     task_data = parsed.get("arguments") or parsed.get("task_request")
+                    
+                    # Extract items from parser if provided
+                    parser_items = None
+                    if "items" in task_data:
+                        parser_items = [
+                            PlannedItem(
+                                name=item.get("name"),
+                                mandatory=item.get("mandatory", True),
+                                keywords=item.get("keywords", [])
+                            )
+                            for item in task_data["items"]
+                        ]
+                        logger.info(f"[REQUEST {request_id}] Parser provided {len(parser_items)} items:")
+                        for idx, item in enumerate(parser_items, 1):
+                            logger.info(f"  {idx}. {item.name} ({'mandatory' if item.mandatory else 'optional'})")
+                    
                     task_arguments = TaskArguments(
                         activity=task_data["activity"],
                         budget=task_data.get("budget"),
-                        query=user_query
+                        query=user_query,
+                        items=parser_items
                     )
                     result = task_tool.execute(task_arguments)
                     logger.info(f"[REQUEST {request_id}] TaskTool completed")
